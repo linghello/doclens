@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# buildozer / Android 构建产物
+.buildozer/
+bin/
+*.apk
+*.aab
+
+# 桌面回归截图（可再生）
+shots/
+
+# 字体工具的中间产物
+assets/fonts/*.out
+assets/fonts/*.bak
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+Desktop.ini

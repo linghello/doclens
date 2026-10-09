@@ -1,0 +1,37 @@
+# 换行符策略 —— 这个文件是必需的，不要删。
+#
+# 背景：本机 git 全局配置是 core.autocrlf=true，会把仓库里的 LF 在检出时
+# 转成 CRLF。但项目里同时有「必须 CRLF」和「必须 LF」两类文件，让 autocrlf
+# 自作主张会直接搞坏功能：
+#
+#   .bat  → cmd.exe 的批处理解析器要求 CRLF，纯 LF 会错位、吞字符
+#   .sh   → bash 要求 LF，CRLF 会报 bad interpreter: /bin/bash^M
+#
+# 所以这里显式钉死，忽略 autocrlf。
+
+# 默认统一 LF
+* text=auto eol=lf
+
+# Windows 批处理：CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# shell / Python / 文档 / 配置：LF
+*.sh   text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.spec text eol=lf
+
+# 二进制，别做任何转换
+*.ttf binary
+*.otf binary
+*.ttc binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.apk binary
+*.so  binary
