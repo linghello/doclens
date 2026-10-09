@@ -53,7 +53,19 @@ android.presplash_color = #4F46E5
 android.release_artifact = apk
 android.debug_artifact = apk
 
-# 不启用 P4A 的 bootstrap 预编译缓存（首次构建会慢，但更稳）
+# ── python-for-android ──────────────────────────────────
+# ⚠️ 必须钉住分支，不要删这行！
+#
+# buildozer 默认拉 p4a 的 **master**，而 master 目前把 python3 recipe 推到了
+# Python 3.14.2 —— 但 Kivy 2.3.1 的 recipe 又把 Cython 限死在 <=3.0.12，
+# 而那个 Cython 不支持 Python 3.14。结果会在编译 Kivy 时炸掉。
+#
+# 各版本对照：
+#   master         -> Python 3.14.2  ← 不能用
+#   v2024.01.21    -> Python 3.11.5  ← 用这个
+#   v2023.09.16    -> Python 3.10.10
+p4a.branch = v2024.01.21
+
 p4a.bootstrap = sdl2
 p4a.local_recipes =
 

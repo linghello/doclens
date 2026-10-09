@@ -1,7 +1,7 @@
 name: Build APK
 
 # 不需要本机装 WSL / Android SDK —— 全部在 GitHub 的 Ubuntu 机器上跑完，
-# 出 APK 后直接当 artifact 下载。适合没有 WSL 的机器。
+# 出 APK 后直接当 artifact 下载。
 #
 # 用法：
 #   1. 把整个 doclens 目录 push 到 GitHub 仓库
@@ -28,6 +28,43 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------
+      # 这一步是必需的，不是优化！
+      #
+      # GitHub 托管的 ubuntu 运行器**只有约 14 GB 可用磁盘**，而且预装了
+      # 一大堆用不上的东西，其中最要命的是 /usr/local/lib/android ——
+      # 一份约 6 GB 的 Android SDK。我们用的是 buildozer 自己下载的那份，
+      # 这份纯粹占地方。
+      #
+      # 而 python-for-android 完整编译（hostpython3 + python3 + 所有 recipe
+      # + NDK 交叉编译）要 15-20 GB。
+      #
+      # 第一次构建就是死在磁盘上：日志在 hostpython3 编译到一半时**硬生生截断**，
+      # 之后 7 分钟完全没有输出 —— 因为磁盘满了，运行器连日志都写不进去，
+      # 所以日志里找不到任何 "No space left on device" 字样，很有迷惑性。
+      #
+      # ⚠️ 不要删 /opt/hostedtoolcache 整个目录！setup-python 装的 Python
+      #    就在里面（/opt/hostedtoolcache/Python/...），删了会找不到解释器。
+      #    只删它下面的 CodeQL 子目录。
+      # ---------------------------------------------------------------
+      - name: Free up disk space
+        run: |
+          echo "==== 清理前 ===="
+          df -h /
+          sudo rm -rf /usr/local/lib/android      # 预装 Android SDK，约 6 GB（我们不用）
+          sudo rm -rf /usr/share/dotnet           # .NET，约 1.5 GB
+          sudo rm -rf /usr/local/.ghcup           # Haskell，约 3 GB
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/share/swift            # Swift，约 2.5 GB
+          sudo rm -rf /opt/hostedtoolcache/CodeQL # 只删 CodeQL，别动 Python
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /usr/local/share/chrome
+          sudo rm -rf /opt/az
+          sudo apt-get clean
+          echo "==== 清理后 ===="
+          df -h /
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -64,6 +101,9 @@ jobs:
 
       - name: Show buildozer version
         run: buildozer --version
+
+      - name: Show disk before build
+        run: df -h /
 
       - name: Build debug APK
         # buildozer 拒绝 root 运行；GH runner 默认就是非 root 用户，无需处理。

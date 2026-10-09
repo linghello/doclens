@@ -98,6 +98,37 @@ bash build_apk.sh clean        # 清掉 .buildozer / bin 重来
 
 工作流固定在 `ubuntu-22.04` —— 24.04 移除了 `libtinfo5`，buildozer 会找不到它而报错。
 
+**云端构建踩过的两个坑（都已修好，改配置前务必看一眼）**
+
+**1. 磁盘不够 —— 失败得毫无线索。** GitHub 托管的 Ubuntu 运行器**只有约 14 GB 可用磁盘**，
+却预装了约 6 GB 的 Android SDK（`/usr/local/lib/android`，我们不用这份）。
+而 p4a 完整编译要 15–20 GB。
+
+第一次构建的症状特别有迷惑性：日志在编译 hostpython3 到一半时**硬生生截断**，
+之后 7 分钟完全空白，**而且日志里找不到任何 `No space left on device`** ——
+因为磁盘满了，运行器连日志都写不进去。
+
+工作流里的 `Free up disk space` 步骤是**必需的**，不是优化。
+⚠️ 注意它只删 `/opt/hostedtoolcache/CodeQL`，**不能删整个 `/opt/hostedtoolcache`** ——
+`setup-python` 装的 Python 就在里面（`/opt/hostedtoolcache/Python/...`）。
+
+**2. `p4a.branch` 必须钉住。** `buildozer.spec` 里这一行不要删：
+
+```ini
+p4a.branch = v2024.01.21
+```
+
+buildozer 默认拉 p4a 的 **master**，而 master 已经把 `python3` recipe 推到了
+**Python 3.14.2**；但 Kivy 2.3.1 的 recipe 又把 Cython 限死在 `<=3.0.12`，
+那个 Cython 不支持 Python 3.14 —— 会在编译 Kivy 时炸掉。
+
+| p4a 版本 | 默认 Python | 结论 |
+| --- | --- | --- |
+| master | 3.14.2 | ❌ 不能用 |
+| **v2024.01.21** | **3.11.5** | ✅ 用这个 |
+| v2023.09.16 | 3.10.10 | 偏旧 |
+
+
 ### 产物与安装
 
 ```
