@@ -15,7 +15,6 @@ REM ============================================================
 setlocal EnableExtensions
 set "PROJ=%~dp0"
 if "%PROJ:~-1%"=="\" set "PROJ=%PROJ:~0,-1%"
-set "VENV_PY=C:\Users\35853\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
 
 if not exist "%PROJ%\main.py" goto :no_main
 
@@ -23,14 +22,37 @@ echo.
 echo === DocLens desktop preview ===
 echo.
 
-REM ---- 1) prefer the project venv -------------------------
-if not exist "%VENV_PY%" goto :try_path
-"%VENV_PY%" -c "import kivy" >nul 2>&1
-if errorlevel 1 goto :try_path
-set "PY=%VENV_PY%"
+REM ---- find a Python that already has Kivy ----------------
+REM   Search order:
+REM     1. .venv in the project folder   (standard, portable)
+REM     2. venv  in the project folder
+REM     3. LOCAL_VENV below              (per-machine override)
+REM     4. python.exe on PATH
+
+if not exist "%PROJ%\.venv\Scripts\python.exe" goto :try_venv2
+"%PROJ%\.venv\Scripts\python.exe" -c "import kivy" >nul 2>&1
+if errorlevel 1 goto :try_venv2
+set "PY=%PROJ%\.venv\Scripts\python.exe"
 goto :run
 
-REM ---- 2) fall back to python.exe on PATH ----------------
+:try_venv2
+if not exist "%PROJ%\venv\Scripts\python.exe" goto :try_local
+"%PROJ%\venv\Scripts\python.exe" -c "import kivy" >nul 2>&1
+if errorlevel 1 goto :try_local
+set "PY=%PROJ%\venv\Scripts\python.exe"
+goto :run
+
+:try_local
+REM   Per-machine override. Written with %USERPROFILE% so this repo
+REM   carries no hard-coded username; on another machine the path
+REM   simply does not exist and we fall through to python.exe on PATH.
+set "LOCAL_VENV=%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
+if not exist "%LOCAL_VENV%" goto :try_path
+"%LOCAL_VENV%" -c "import kivy" >nul 2>&1
+if errorlevel 1 goto :try_path
+set "PY=%LOCAL_VENV%"
+goto :run
+
 :try_path
 where python.exe >nul 2>&1
 if errorlevel 1 goto :no_python
@@ -39,7 +61,7 @@ if errorlevel 1 goto :no_python
 set "PY=python.exe"
 goto :run
 
-REM ---- 3) run -------------------------------------------
+REM ---- run ------------------------------------------------
 :run
 echo   python  : %PY%
 echo   project : %PROJ%
@@ -62,7 +84,7 @@ pause
 endlocal
 exit /b %RC%
 
-REM ---- error paths --------------------------------------
+REM ---- error paths ----------------------------------------
 :no_main
 echo [X] main.py not found next to this .bat
 echo     Put this file in the doclens project root.
@@ -74,13 +96,12 @@ exit /b 1
 :no_python
 echo [X] No Python with Kivy found.
 echo.
-echo     Tried:
-echo       %VENV_PY%
-echo       python.exe on PATH
+echo     Create a venv in the project folder and install Kivy:
 echo.
-echo     Install Kivy into the venv with:
+echo       python -m venv .venv
+echo       .venv\Scripts\python.exe -m pip install "kivy==2.3.1" pillow
 echo.
-echo       "%VENV_PY%" -m pip install "kivy==2.3.1"
+echo     Then double-click this file again.
 echo.
 pause
 endlocal
