@@ -266,6 +266,9 @@ class DocLens(App):
     # ── 输入事件 ────────────────────────────────────
     def _on_key(self, _win, key, *_a):
         if key == 27:  # 返回键 / Esc
+            if getattr(self.ui, "editor", None) is not None:
+                self.ui.editor.close()
+                return True
             if self.ui._sheet is not None:
                 self.ui._sheet.dismiss()
                 self.ui._sheet = None

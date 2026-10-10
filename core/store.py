@@ -31,13 +31,16 @@ class Store:
         self.base = _root()
         self.docs_dir = os.path.join(self.base, "documents")
         self.thumb_dir = os.path.join(self.base, "thumbnails")
+        self.images_dir = os.path.join(self.base, "images")
         self.state_path = os.path.join(self.base, "state.json")
         self.cache_path = os.path.join(self.base, "cache.json")
         os.makedirs(self.docs_dir, exist_ok=True)
         os.makedirs(self.thumb_dir, exist_ok=True)
+        os.makedirs(self.images_dir, exist_ok=True)
         self.state = self._load(self.state_path, {
             "favorites": [], "progress": {}, "theme": "system",
             "font_scale": 1.0, "history": [], "first_run": True,
+            "styles": {},
         })
         self._cache = self._load(self.cache_path, {})
         self._dirty = False
@@ -159,6 +162,81 @@ class Store:
         shutil.copyfile(src_path, dst)
         return name
 
+    # ── 图片 / 文档样式 ─────────────────────────────
+    IMG_EXT = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+
+    def import_image(self, src_path):
+        """把图片复制进 App 的 images 目录，返回可直接写进 markdown 的相对路径。"""
+        ext = os.path.splitext(src_path)[1].lower()
+        if ext not in self.IMG_EXT:
+            ext = ".jpg"
+        stem = re.sub(r'[\\/:*?"<>|\s]+', "_",
+                      os.path.splitext(os.path.basename(src_path))[0])[:40] or "image"
+        cand = stem + ext
+        k = 1
+        while os.path.exists(os.path.join(self.images_dir, cand)):
+            k += 1
+            cand = "%s_%d%s" % (stem, k, ext)
+        shutil.copyfile(src_path, os.path.join(self.images_dir, cand))
+        return "images/" + cand
+
+    def image_path(self, src):
+        """把 markdown 里的图片路径解析成本机绝对路径；找不到返回 None。"""
+        if not src:
+            return None
+        s = str(src).strip().strip("<>")
+        if s.startswith("file://"):
+            s = s[7:]
+        cands = []
+        if os.path.isabs(s):
+            cands.append(s)
+        else:
+            # 依次试：App 数据根 / documents / images
+            cands.append(os.path.join(self.base, s))
+            cands.append(os.path.join(self.docs_dir, s))
+            cands.append(os.path.join(self.images_dir, os.path.basename(s)))
+        for p in cands:
+            try:
+                if os.path.isfile(p):
+                    return p
+            except OSError:
+                continue
+        return None
+
+    def doc_style(self, rel):
+        """每篇文档的个性化样式：{'bg': 'images/xx.jpg', 'bg_opacity': 0.22}"""
+        try:
+            return dict(self.state.get("styles", {}).get(rel, {}))
+        except Exception:
+            return {}
+
+    def set_doc_style(self, rel, **kw):
+        styles = self.state.setdefault("styles", {})
+        cur = dict(styles.get(rel, {}) or {})
+        cur.update(kw)
+        if not cur.get("bg"):
+            cur.pop("bg", None)
+        if cur:
+            styles[rel] = cur
+        else:
+            styles.pop(rel, None)
+        self._dirty = True
+        self.flush()
+        return cur
+
+    def write_text(self, rel, text):
+        """覆盖写入正文（编辑器保存用），并让预览缓存失效。"""
+        path = os.path.join(self.docs_dir, rel)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+        self._cache.pop(rel, None)
+        self._cache_dirty = True
+        self._dirty = True
+        self.flush_cache()
+        return True
+
     def delete(self, rel):
         path = os.path.join(self.docs_dir, rel)
         try:
@@ -213,6 +291,13 @@ class Store:
 
     def cached_preview(self, rel):
         return self._cache.get(rel, {}).get("preview", "")
+
+    def invalidate_meta(self, rel):
+        """丢弃某篇的摘要/字数缓存（编辑保存后要重算）。"""
+        if rel in self._cache:
+            self._cache.pop(rel, None)
+            self._cache_dirty = True
+            self.flush_cache()
 
     # ── 收藏 ────────────────────────────────────────
     def is_fav(self, rel):

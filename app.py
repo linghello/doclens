@@ -57,6 +57,7 @@ class Shell(FloatLayout):
         self.bind(pos=self._sync_page_bg, size=self._sync_page_bg)
         self._sync_page_bg()
         self.reader = None
+        self.editor = None
         self.library = LibraryView(app)
         self.add_widget(self.library)
         self._sheet = None
@@ -155,8 +156,24 @@ class Shell(FloatLayout):
         more = IconButton(icon=ICON_MORE, size=(dp(38), dp(38)), font_size=sp(18),
                           icon_color=self.app.theme.c("text2"))
         more.bind(on_release=lambda *a: self.app.reader_menu(rv))
+        # 手绘批注（圈点）：用中文字当图标 —— ⚙/✎ 这类冷门符号未必在子集字体里
+        ink = IconButton(icon="笔", size=(dp(38), dp(38)), font_size=sp(16),
+                         icon_color=self.app.theme.c("text2"))
+
+        def toggle_ink(*a):
+            on = rv.toggle_ink_mode()
+            ink.icon_color = (self.app.theme.c("accent") if on
+                              else self.app.theme.c("text2"))
+            self.app.toast("批注已开启：用手指圈点，画完再点一次「笔」退出"
+                           if on else "批注已关闭（自动保存）", short=not on)
+        ink.bind(on_release=toggle_ink)
+        edit = IconButton(icon="编", size=(dp(38), dp(38)), font_size=sp(16),
+                          icon_color=self.app.theme.c("text2"))
+        edit.bind(on_release=lambda *a: self.app.open_editor(rv.doc_rel, rv.doc_title))
         bar.add_right(fav)
         bar.add_right(more)
+        bar.add_right(ink)
+        bar.add_right(edit)
         overlay.add_widget(bar)
 
         prog = ProgressLine(value=rv.progress, color=self.app.theme.c("primary"),
@@ -304,10 +321,16 @@ class DocLensApp(object):
             self.pending_open = (rel, title)
             return
         ui.open_reader(rel, title)
-        self._maybe_index(rel)
+        # 摘要 / 字数统计推迟到排版之后再做，别和"打开文档"抢主线程
+        Clock.schedule_once(lambda dt: self._maybe_index(rel), 0.25)
 
-    def _maybe_index(self, rel):
-        """第一次打开时生成摘要 / 字数缓存（廉价，直接同步做）。"""
+    def _maybe_index(self, rel, force=False):
+        """生成摘要 / 字数缓存（首次打开，或编辑保存之后）。"""
+        if force:
+            try:
+                self.store.invalidate_meta(rel)
+            except Exception:
+                pass
         if self.store.cached_preview(rel):
             return
         text = self.store.read(rel) or ""
@@ -367,14 +390,182 @@ class DocLensApp(object):
         self.maybe_first_hint()
 
     def new_document(self):
+        """新建文档 —— 直接进编辑器，保存时才真正落盘生成文件。"""
         ui = getattr(self._app, "ui", None)
         if ui is None:
             return
-        name = self.store.import_text("未命名.md",
-                                      "# 未命名\n\n在这里写下第一行文字。\n")
-        ui.library.refresh()
-        self.open_doc({"rel": name, "title": "未命名"})
-        self.toast("已新建文档")
+        self._close_sheet()
+        self.open_editor(None, "新建文档")
+
+    # ── 添加菜单（首页 ＋ 号） ──────────────────────
+    def add_menu(self):
+        ui = getattr(self._app, "ui", None)
+        if ui is None:
+            return
+        body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(2))
+        rows = [
+            ("＋", "导入文件（.md / .txt）", self.import_dialog),
+            ("新", "新建文档", self.new_document),
+        ]
+        for icon, text, cb in rows:
+            body.add_widget(self._menu_row(icon, text, cb))
+        body.height = dp(52) * len(rows) + dp(4)
+        ui.show_sheet("添加", body, body.height)
+
+    # ── 编辑器 ──────────────────────────────────────
+    def open_editor(self, rel=None, title=""):
+        ui = getattr(self._app, "ui", None)
+        if ui is None or getattr(ui, "editor", None) is not None:
+            return None
+        self._close_sheet()
+        try:
+            from screens.editor import EditorView
+        except Exception as exc:
+            self.toast("编辑器不可用：%s" % exc)
+            return None
+        ev = EditorView(self, rel=rel, title=title, size_hint=(1, 1))
+        ui.editor = ev
+        ui.add_widget(ev)
+        ev.x = ui.width
+        Animation(x=0, d=0.22, t="out_cubic").start(ev)
+        return ev
+
+    def close_editor(self):
+        ui = getattr(self._app, "ui", None)
+        if ui is None or getattr(ui, "editor", None) is None:
+            return
+        ev = ui.editor
+        ui.editor = None
+        anim = Animation(x=ui.width, d=0.18, t="in_cubic")
+        anim.bind(on_complete=lambda *x: ui.remove_widget(ev))
+        anim.start(ev)
+        Clock.schedule_once(lambda dt: ui.library.refresh(smooth=False), 0.05)
+
+    def after_edit_saved(self, rel):
+        """编辑保存后：摘要缓存作废、列表刷新（索引推迟，别和保存抢主线程）。"""
+        try:
+            self.store.invalidate_meta(rel)
+        except Exception:
+            pass
+        Clock.schedule_once(lambda dt: self._maybe_index(rel, force=True), 0.08)
+        ui = getattr(self._app, "ui", None)
+        if ui is not None:
+            try:
+                ui.library.refresh(smooth=False)
+            except Exception:
+                pass
+
+    # ── 每篇文档的个性化（半透明背景图） ────────────
+    def _apply_style_to_reader(self, rel):
+        ui = getattr(self._app, "ui", None)
+        if (ui is not None and getattr(ui, "reader", None) is not None
+                and ui.reader.doc_rel == rel):
+            try:
+                ui.reader.apply_style()
+            except Exception:
+                pass
+
+    def doc_bg_sheet(self, rel, on_change=None):
+        ui = getattr(self._app, "ui", None)
+        if ui is None or not rel:
+            return
+        c = self.theme
+        cur = self.store.doc_style(rel)
+
+        def _tip(text, size=13, color=None):
+            lbl = Label(text=text, font_name=FONT, font_size=sp(size),
+                        color=color or c.c("text2"), markup=False, halign="left",
+                        valign="middle", size_hint_y=None, height=dp(26))
+            lbl.bind(size=lambda i, v: setattr(i, "text_size", (i.width, None)))
+            return lbl
+
+        body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10))
+        body.add_widget(_tip("给这篇文档配一张半透明背景图（只影响这一篇）", 12.5))
+
+        pick = ModernButton(text=("更换背景图" if cur.get("bg") else "选择背景图"),
+                            surface_bg=c.c("surface3"), text_color=c.c("text"),
+                            size_hint_y=None, height=dp(46), radius=[dp(13)] * 4)
+
+        def _pick(*a):
+            droid.pick_files(
+                lambda items: self._bg_picked(rel, items, sheet, on_change),
+                allow_multiple=False, images_only=True)
+        pick.bind(on_release=_pick)
+        body.add_widget(pick)
+
+        body.add_widget(_tip("不透明度", 12.5, c.c("text2")))
+        row = BoxLayout(size_hint_y=None, height=dp(42), spacing=dp(8))
+        for val, txt in ((0.10, "10%"), (0.22, "22%"), (0.35, "35%"), (0.55, "55%")):
+            on = abs(float(cur.get("bg_opacity", 0.22) or 0.22) - val) < 0.02
+            b = ModernButton(text=txt,
+                             surface_bg=c.c("primary") if on else c.c("surface3"),
+                             text_color=c.c("on_primary") if on else c.c("text2"),
+                             radius=[dp(11)] * 4)
+            b.bind(on_release=lambda *a, v=val: self._set_bg_opacity(v, rel, on_change))
+            row.add_widget(b)
+        body.add_widget(row)
+
+        extra = 0
+        if cur.get("bg"):
+            rm = ModernButton(text="移除背景", surface_bg=c.c("accent"),
+                              text_color=[1, 1, 1, 1], size_hint_y=None,
+                              height=dp(44), radius=[dp(13)] * 4)
+
+            def _rm(*a):
+                self.store.set_doc_style(rel, bg=None)
+                self._apply_style_to_reader(rel)
+                if sheet is not None:
+                    sheet.dismiss()
+                ui._sheet = None
+                self.toast("已移除背景")
+                if on_change:
+                    try:
+                        on_change()
+                    except Exception:
+                        pass
+            rm.bind(on_release=_rm)
+            body.add_widget(rm)
+            extra = dp(54)
+
+        body.height = dp(178) + extra
+        sheet = ui.show_sheet("文档背景", body, body.height)
+        return sheet
+
+    def _bg_picked(self, rel, items, sheet=None, on_change=None):
+        if not items:
+            return
+        path = items[0][1]
+        try:
+            r = self.store.import_image(path)
+        except Exception as exc:
+            self.toast("设置失败：%s" % exc)
+            return
+        self.store.set_doc_style(rel, bg=r)
+        self._apply_style_to_reader(rel)
+        if sheet is not None:
+            try:
+                sheet.dismiss()
+            except Exception:
+                pass
+        ui = getattr(self._app, "ui", None)
+        if ui is not None:
+            ui._sheet = None
+        self.toast("背景已设置")
+        if on_change:
+            try:
+                on_change()
+            except Exception:
+                pass
+
+    def _set_bg_opacity(self, val, rel, on_change=None):
+        self.store.set_doc_style(rel, bg_opacity=float(val))
+        self._apply_style_to_reader(rel)
+        self.toast("背景不透明度 %d%%" % int(val * 100), short=True)
+        if on_change:
+            try:
+                on_change()
+            except Exception:
+                pass
 
     def doc_menu(self, doc, anchor):
         c = self.theme
@@ -407,14 +598,16 @@ class DocLensApp(object):
                   padding=[dp(14), 0, dp(8), 0], spacing=dp(12),
                   orientation="horizontal",
                   ripple_rgba=c.c("primary", 0.12))
-        ic = Label(text=icon, font_name=FONT, font_size=sp(17),
-                   color=c.c("accent") if danger else c.c("text2"),
-                   size_hint=(None, 1), width=dp(24), markup=False)
         lbl = Label(text=text, font_name=FONT, font_size=sp(15),
                     color=c.c("accent") if danger else c.c("text"),
                     halign="left", valign="middle", markup=False)
         lbl.bind(size=lambda i, v: setattr(i, "text_size", (i.width, None)))
-        row.add_widget(ic)
+        # 图标可留空（子集字体里不一定有合适字形时，宁可不放）
+        if icon:
+            ic = Label(text=icon, font_name=FONT, font_size=sp(17),
+                       color=c.c("accent") if danger else c.c("text2"),
+                       size_hint=(None, 1), width=dp(24), markup=False)
+            row.add_widget(ic)
         row.add_widget(lbl)
         row.bind(on_release=lambda *a: (self._close_sheet(), cb()))
         return row
@@ -504,6 +697,10 @@ class DocLensApp(object):
              "取消收藏" if rv.is_fav else "加入收藏",
              lambda: self._reader_fav(rv)),
             (ICON_READ, "重新从头阅读", lambda: self._reader_top(rv)),
+            ("", "编辑这篇文档", lambda: self.open_editor(rv.doc_rel, rv.doc_title)),
+            ("", "文档背景（半透明）", lambda: self.doc_bg_sheet(rv.doc_rel)),
+            ("", "撤销一笔批注", rv.undo_ink),
+            ("", "清空全部批注", rv.clear_ink),
         ]
         for icon, text, cb in rows:
             body.add_widget(self._menu_row(icon, text, cb))

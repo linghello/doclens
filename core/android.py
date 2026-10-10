@@ -182,11 +182,14 @@ def _start_for_result(act, intent, request_code):
 
 
 # ── 文件选择器 ──────────────────────────────────────
-def pick_files(callback, allow_multiple=True):
-    """打开系统文件选择器；回调签名 callback([(display_name, path_or_uri), ...])。"""
+def pick_files(callback, allow_multiple=True, images_only=False):
+    """打开系统文件选择器；回调签名 callback([(display_name, path_or_uri), ...])。
+
+    ``images_only=True`` 时只让选图片（用于插入图片 / 设置背景）。
+    """
     proxy.callback = callback
     if not IS_ANDROID:
-        Clock.schedule_once(lambda dt: _desktop_pick(callback), 0.05)
+        Clock.schedule_once(lambda dt: _desktop_pick(callback, images_only), 0.05)
         return True
 
     try:
@@ -201,7 +204,7 @@ def pick_files(callback, allow_multiple=True):
         Intent = autoclass("android.content.Intent")
         intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
         intent.addCategory(Intent.CATEGORY_OPENABLE)
-        intent.setType("*/*")
+        intent.setType("image/*" if images_only else "*/*")
         if allow_multiple:
             intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, True)
 
@@ -264,7 +267,7 @@ def _query_name(uri):
 
 
 # ── 桌面端退路 ──────────────────────────────────────
-def _desktop_pick(callback):
+def _desktop_pick(callback, images_only=False):
     """桌面端用 Kivy 自带的选择器（支持多选）。"""
     try:
         from kivy.uix.filechooser import FileChooserListView
@@ -272,11 +275,13 @@ def _desktop_pick(callback):
         from kivy.uix.boxlayout import BoxLayout
         from kivy.uix.button import Button
 
+        if images_only:
+            filters = ["*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.bmp"]
+        else:
+            filters = ["*.md", "*.markdown", "*.txt", "*.log", "*.csv", "*.json", "*"]
         root = BoxLayout(orientation="vertical", spacing=4, padding=4)
         fc = FileChooserListView(path=os.path.expanduser("~"),
-                                 filters=["*.md", "*.markdown", "*.txt", "*.log",
-                                          "*.csv", "*.json", "*"],
-                                 multiselect=True)
+                                 filters=filters, multiselect=not images_only)
         root.add_widget(fc)
         bar = BoxLayout(size_hint_y=None, height=44, spacing=6)
         popup = Popup(title="选择要导入的文档（可多选）", content=root,

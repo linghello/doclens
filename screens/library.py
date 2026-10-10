@@ -288,7 +288,7 @@ class LibraryView(BoxLayout):
         add = IconButton(icon="＋", size=(dp(46), dp(46)), font_size=sp(22),
                          icon_color=c.c("on_primary"), base_color=c.c("primary"),
                          radius_ratio=0.34)
-        add.bind(on_release=lambda *a: self.app.import_dialog())
+        add.bind(on_release=lambda *a: self.app.add_menu())
         srow.add_widget(add)
         head.add_widget(srow)
         # 高度按子项累加，别再写死 —— 写死会和实际内容错位，标题被顶栏压住
@@ -396,7 +396,7 @@ class LibraryView(BoxLayout):
         if not docs:
             self.list_box.add_widget(EmptyState(
                 title="书架上空空的",
-                desc="点右上角的 ＋，从手机里导入 .md / .txt 文档\n（也可以直接把文件用「分享到」发进来）",
+                desc="点右上角的 ＋ 导入 .md / .txt 文档，或直接新建一篇\n（也可以把文件用「分享到」发进来）",
                 color=c.c("text"), accent=c.c("primary")))
             return
         if not shown:

@@ -8,16 +8,20 @@
     而且高度是精确的，滚动条和进度计算都准。
 """
 
+import json
 import os
 import re
 
+from kivy.animation import Animation
 from kivy.clock import Clock
+from kivy.core.image import Image as CoreImage
 from kivy.core.text import Label as CoreLabel
 from kivy.graphics import Color, Line, Rectangle, RoundedRectangle
 from kivy.metrics import dp, sp
-from kivy.properties import BooleanProperty, NumericProperty, StringProperty
+from kivy.properties import BooleanProperty, ListProperty, NumericProperty, StringProperty
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.image import Image
 from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.widget import Widget
@@ -31,6 +35,22 @@ MONO = "AppMono"
 
 # 正文基准字号（sp）。mdrender 对正文块给倍率 1.0，对标题给绝对字号。
 BODY_SIZE = 15.0
+
+ASSETS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                      "assets")
+
+
+def _measure_label(lbl):
+    """让 Label 立刻完成一次排版，并让它把纹理缓存下来。
+
+    这是打开速度的关键：以前为了量高度会另建一个临时 Label 做
+    ``texture_update()``，然后真正的 Label 渲染时**又光栅化一遍** ——
+    同一段文字排版两次。现在直接量真身，渲染时复用同一张纹理，省掉一半。
+    """
+    try:
+        lbl.texture_update()
+    except Exception:
+        pass
 
 
 class SelectableLabel(Label):
@@ -70,6 +90,205 @@ def _text_height(text, font_name, font_size, width, line_spacing=1.0):
     return h
 
 
+class InkLayer(Widget):
+    """批注手绘层：叠在正文之上、随正文一起滚动。
+
+    坐标按「归一化」保存（x / 层宽、y / 层高），所以换字号、换屏宽之后
+    批注依旧贴在同一段文字上。绘制时分两条线：已完成的笔画各自成一条
+    Line（只在增删时改），正在画的只有一条 live Line（每帧只更新它），
+    这样笔画再多也不会卡。
+    """
+
+    def __init__(self, app, doc_rel, **kw):
+        super().__init__(**kw)
+        self.app = app
+        self.doc_rel = doc_rel
+        self.strokes = []                 # 归一化的已完成笔画
+        self.color = [0.93, 0.27, 0.36, 1]
+        self.stroke_w = dp(3.2)
+        self._cur = None                  # 正在画的（像素坐标）
+        self.disabled = True              # 默认不拦截触摸
+        with self.canvas.before:
+            self._c_done = Color(rgba=self.color)
+        self._done_lines = []
+        with self.canvas:
+            self._c_live = Color(rgba=self.color)
+            self._live = Line(points=[], width=self.stroke_w,
+                              joint="round", cap="round")
+        self.bind(pos=self._relayout, size=self._relayout)
+
+    # ── 持久化 ──────────────────────────────────
+    def _path(self):
+        d = os.path.join(self.app.store.base, "ink")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, self.doc_rel + ".json")
+
+    def load(self):
+        try:
+            with open(self._path(), "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            self.strokes = [[(float(p[0]), float(p[1])) for p in s]
+                            for s in data.get("strokes", []) if len(s) >= 2]
+        except Exception:
+            self.strokes = []
+        self._rebuild_lines()
+
+    def save(self):
+        try:
+            with open(self._path(), "w", encoding="utf-8") as fh:
+                json.dump({"strokes": [[[round(x, 5), round(y, 5)] for x, y in s]
+                                       for s in self.strokes]}, fh)
+        except Exception:
+            pass
+
+    # ── 坐标 ────────────────────────────────────
+    def _norm2px(self, nx, ny):
+        w = max(1.0, self.width)
+        h = max(1.0, self.height)
+        return (self.x + nx * w, self.y + (1.0 - ny) * h)
+
+    def _pts(self, stroke):
+        out = []
+        for nx, ny in stroke:
+            out.extend(self._norm2px(nx, ny))
+        return out
+
+    def _new_line(self, points):
+        line = Line(points=points, width=self.stroke_w,
+                    joint="round", cap="round")
+        self.canvas.before.add(line)
+        self._done_lines.append(line)
+        return line
+
+    def _rebuild_lines(self):
+        for l in self._done_lines:
+            self.canvas.before.remove(l)
+        self._done_lines = []
+        self._live.points = []
+        for s in self.strokes:
+            self._new_line(self._pts(s))
+
+    def _relayout(self, *a):
+        self._rebuild_lines()
+
+    def clear(self):
+        self.strokes = []
+        self._cur = None
+        self.save()
+        self._rebuild_lines()
+
+    def undo(self):
+        if self.strokes:
+            self.strokes.pop()
+            self.save()
+            self._rebuild_lines()
+
+    @property
+    def count(self):
+        return len(self.strokes)
+
+    # ── 触摸 ────────────────────────────────────
+    def collide_point(self, x, y):
+        # 非批注模式下彻底不参与命中判定，保证正文照常滚动
+        if self.disabled:
+            return False
+        return super().collide_point(x, y)
+
+    def on_touch_down(self, touch):
+        if self.disabled or not self.collide_point(*touch.pos):
+            return False
+        self._cur = [(touch.x, touch.y)]
+        self._live.points = list(self._cur)
+        return True
+
+    def on_touch_move(self, touch):
+        if self.disabled or self._cur is None:
+            return False
+        self._cur.append((touch.x, touch.y))
+        # 只更新 live 这一条，不重画全部笔画
+        pts = self._live.points
+        pts.extend((touch.x, touch.y))
+        return True
+
+    def on_touch_up(self, touch):
+        if self._cur is None:
+            return False
+        pts = self._cur
+        self._cur = None
+        self._live.points = []
+        w = max(1.0, self.width)
+        h = max(1.0, self.height)
+        norm = [((x - self.x) / w, 1.0 - (y - self.y) / h) for x, y in pts]
+        if len(norm) >= 2:
+            self.strokes.append(norm)
+            self._new_line(self._pts(norm))
+            self.save()
+        return True
+
+
+class _LoadingOverlay(FloatLayout):
+    """打开文档时的等待层：一张「正在思考……」贴纸 + 上下轻浮动。"""
+
+    bob = NumericProperty(0.0)
+
+    def __init__(self, app, **kw):
+        super().__init__(**kw)
+        self.app = app
+        with self.canvas.before:
+            self._c = Color(rgba=app.theme.c("bg"))
+            self._r = Rectangle()
+        self.bind(pos=self._sync_bg, size=self._sync_bg)
+        self._sync_bg()
+        self._img = Image(source=os.path.join(ASSETS, "loading", "thinking.png"),
+                          size_hint=(None, None), allow_stretch=True,
+                          keep_ratio=True, mipmap=True)
+        self.add_widget(self._img)
+        self._lbl = Label(text="正在打开文档…", font_name=FONT, font_size=sp(13.5),
+                          color=app.theme.c("text2"), markup=False,
+                          size_hint=(None, None), size=(dp(240), dp(24)),
+                          halign="center", valign="middle")
+        self.add_widget(self._lbl)
+        self.bind(bob=lambda *a: self._sync_items(),
+                  size=lambda *a: self._sync_items())
+        self._sync_items()
+        self._anim = None
+
+    def _sync_bg(self, *a):
+        self._r.pos = self.pos
+        self._r.size = self.size
+
+    def _sync_items(self, *a):
+        iw = min(dp(230), max(dp(140), self.width * 0.52))
+        ih = iw * (428.0 / 420.0)
+        self._img.size = (iw, ih)
+        cx = self.width / 2.0
+        self._img.pos = (cx - iw / 2.0,
+                         self.height * 0.56 + self.bob * dp(12) - ih / 2.0)
+        self._lbl.pos = (cx - dp(120), self.height * 0.56 - ih / 2.0 - dp(40))
+
+    def start(self):
+        self.opacity = 1.0
+        try:
+            self._anim = (Animation(bob=1.0, d=0.85, t="in_out_sine")
+                          + Animation(bob=0.0, d=0.85, t="in_out_sine"))
+            self._anim.repeat = True
+            self._anim.start(self)
+        except Exception:
+            pass
+
+    def stop(self, on_done=None):
+        if self._anim is not None:
+            try:
+                self._anim.cancel(self)
+            except Exception:
+                pass
+            self._anim = None
+        anim = Animation(opacity=0.0, d=0.16, t="out_quad")
+        if on_done is not None:
+            anim.bind(on_complete=lambda *a: on_done())
+        anim.start(self)
+
+
 class ReaderView(FloatLayout):
     """阅读器主体。
 
@@ -92,10 +311,19 @@ class ReaderView(FloatLayout):
         self.reparse_ev = None
         self.save_ev = None
         self._saved_progress = 0.0
+        self.style = {}
+        self._built_once = False
+        self._tries = 0
+        self.ink = None
+        self.ink_mode = False
+        self._loading = None
+        self._bg_tex = None
         # 不透明底色：否则会把下面的文档库透出来
         with self.canvas.before:
             self._bg_c = Color(rgba=app.theme.c("bg"))
             self._bg_r = Rectangle()
+            self._bg_img_c = Color(rgba=[1, 1, 1, 0])
+            self._bg_img = Rectangle(texture=None)
         self.bind(pos=self._sync_bg, size=self._sync_bg)
         self._sync_bg()
         # 内层滚动容器：正文全在这里面
@@ -107,6 +335,38 @@ class ReaderView(FloatLayout):
     def _sync_bg(self, *a):
         self._bg_r.pos = self.pos
         self._bg_r.size = self.size
+        self._sync_bg_image()
+
+    def _sync_bg_image(self, *a):
+        """半透明背景图：按 cover 方式铺满整页。"""
+        tex = self._bg_tex
+        if tex is None:
+            self._bg_img_c.rgba = [1, 1, 1, 0]
+            self._bg_img.texture = None
+            return
+        self._bg_img_c.rgba = [1, 1, 1, float(self.style.get("bg_opacity", 0.22))]
+        tw_, th_ = tex.size
+        w, h = self.size
+        if tw_ <= 0 or th_ <= 0 or w <= 0 or h <= 0:
+            return
+        scale = max(w / float(tw_), h / float(th_))     # cover：铺满，不留边
+        dw, dh = tw_ * scale, th_ * scale
+        self._bg_img.texture = tex
+        self._bg_img.size = (dw, dh)
+        self._bg_img.pos = (self.x + (w - dw) / 2.0, self.y + (h - dh) / 2.0)
+
+    def apply_style(self, style=None):
+        """应用该文档的个性化样式（半透明背景图等）。"""
+        self.style = (style if style is not None
+                      else self.app.store.doc_style(self.doc_rel))
+        path = self.app.store.image_path(self.style.get("bg") or "")
+        self._bg_tex = None
+        if path:
+            try:
+                self._bg_tex = CoreImage(path).texture
+            except Exception:
+                self._bg_tex = None
+        self._sync_bg_image()
 
     def restyle(self):
         """换肤后被复用：刷新底色。"""
@@ -118,12 +378,57 @@ class ReaderView(FloatLayout):
         self.doc_title = title
         self.is_fav = self.app.store.is_fav(rel)
         self._saved_progress = self.app.store.progress(rel)
-        self.app.store.mark_opened(rel)
+        try:
+            self.app.store.mark_opened(rel)
+        except Exception:
+            pass
         text = self.app.store.read(rel) or ""
         self.raw = text
         self.blocks = mdrender.parse(text, 1.0, self.app.colors_for_md())
         self._pending_scroll = self._saved_progress
-        self.rebuild(force=True)
+        self.apply_style()
+        self._show_loading()
+        # ⚠️ 关键：这里绝不能直接开始排版！
+        #    此刻 self.width 还是默认的 100，建完 on_size 一到又得整篇重建一次
+        #    —— 一篇文档白白排版两遍，这就是"打开很慢"的一大半原因。
+        #    改成等布局给出真实宽度后再建一次（期间用加载层顶着）。
+        self._built_once = False
+        self._tries = 0
+        Clock.schedule_once(self._deferred_build, 0)
+
+    # ── 加载层 ──────────────────────────────────────
+    def _show_loading(self):
+        if self._loading is None:
+            self._loading = _LoadingOverlay(self.app, size_hint=(1, 1))
+            self.add_widget(self._loading)
+        else:
+            self._loading.opacity = 1.0
+            if self._loading.parent is None:
+                self.add_widget(self._loading)
+        self._loading.start()
+
+    def _hide_loading(self):
+        ov, self._loading = self._loading, None
+        if ov is None:
+            return
+
+        def _done():
+            try:
+                if ov.parent is not None:
+                    self.remove_widget(ov)
+            except Exception:
+                pass
+        ov.stop(on_done=_done)
+
+    def _deferred_build(self, dt=0):
+        if self.width < dp(80) and self._tries < 30:
+            self._tries += 1
+            Clock.schedule_once(self._deferred_build, 0)
+            return
+        self._last_w = self.width
+        self._build()
+        self._built_once = True
+        self._hide_loading()
 
     def rebuild(self, force=False):
         w = self.width
@@ -133,8 +438,9 @@ class ReaderView(FloatLayout):
         self._build()
 
     def on_size(self, *a):
-        if self.doc_rel:
-            Clock.schedule_once(lambda dt: self.rebuild(), 0.02)
+        # 只有"已经建过一次"之后才跟着尺寸重建；否则会和 _deferred_build 撞车
+        if self.doc_rel and self._built_once:
+            Clock.schedule_once(lambda dt: self.rebuild(), 0.05)
 
     # ── 构建 ────────────────────────────────────────
     def _avail_width(self):
@@ -157,13 +463,29 @@ class ReaderView(FloatLayout):
     def _build(self):
         avail = self._avail_width()
         self.scroll.clear_widgets()
+        # 外层 FloatLayout：正文（box）和手绘批注层（ink）叠在一起，这样批注
+        # 会跟着正文一起滚动，而不是钉死在屏幕上。
+        # （Kivy 的 ScrollView 只能挂一个子控件，所以 ink 不能直接放 ScrollView 下。）
+        wrap = FloatLayout(size_hint_x=1, size_hint_y=None)
+        wrap.pos_hint = {"x": 0, "y": 0}
         # 顶部 62dp：让正文从悬浮顶栏下方开始，别被顶栏压住第一行。
         # 右侧 50dp：给悬浮字号坞让位。
-        box = BoxLayout(orientation="vertical", size_hint_y=None,
+        box = BoxLayout(orientation="vertical", size_hint=(1, None),
+                        pos_hint={"x": 0, "y": 0},
                         padding=[dp(20), dp(62), dp(50), dp(48)])
         box.bind(minimum_height=box.setter("height"))
+        box.bind(height=lambda i, v, w=wrap: setattr(w, "height", v))
         self.box = box
+        self.wrap = wrap
         self._labels = []
+        wrap.add_widget(box)
+
+        ink = InkLayer(self.app, self.doc_rel, size_hint=(1, 1),
+                       pos_hint={"x": 0, "y": 0})
+        ink.disabled = not self.ink_mode        # 平时不拦截触摸，能正常滚动
+        wrap.add_widget(ink)
+        self.ink = ink
+        ink.load()
 
         c = self.app.theme
         meas_cache = {}
@@ -180,14 +502,14 @@ class ReaderView(FloatLayout):
             box.add_widget(Widget(size_hint_y=None, height=dp(120)))
             box.add_widget(Label(text="这份文档是空的", font_name=FONT, font_size=sp(15),
                                  color=c.c("muted"), size_hint_y=None, height=dp(40)))
-            self.scroll.add_widget(box)
+            self.scroll.add_widget(wrap)
             return
 
         for block in self.blocks:
             w = self._make_block(block, avail, measurer)
             if w is not None:
                 box.add_widget(w)
-        self.scroll.add_widget(box)
+        self.scroll.add_widget(wrap)
         Clock.schedule_once(self._apply_start_progress, 0.08)
 
     def _apply_start_progress(self, *a):
@@ -215,26 +537,33 @@ class ReaderView(FloatLayout):
         Kivy 是按含标签的原始串来折行的，两种算法对不上时行数会差一倍，
         文字就溢出色块互相重叠。这里统统一句话：**让 Kivy 折，按它的结果取高**。
         """
-        h = _text_height(text, font_name, size, width, line_spacing)
         lbl = Label(text=text, font_name=font_name, font_size=size,
                     color=color, markup=markup, halign=halign, valign="top",
-                    size_hint_y=None, height=h + (pad or 0),
-                    line_height=line_spacing)
+                    size_hint_y=None, height=dp(10), line_height=line_spacing)
         lbl.text_size = (width, None)
+        # 立刻量真身：这一次排版会被渲染直接复用（旧写法另建临时 Label
+        # 量高度，等于把同一段文字光栅化两遍）。
+        _measure_label(lbl)
+        h = lbl.texture_size[1]
+        if h <= 1:
+            h = (text.count("\n") + 1) * size * line_spacing * 1.32
+        lbl.height = h + (pad or 0)
 
         def _follow(inst, w):
             if w <= dp(20):
                 return
             if abs(w - (inst.text_size[0] or 0)) < 0.6:
                 return
-            nh = _text_height(text, font_name, size, w, line_spacing)
             inst.text_size = (w, None)
+            _measure_label(inst)
+            nh = inst.texture_size[1]
+            if nh <= 1:
+                nh = (text.count("\n") + 1) * size * line_spacing * 1.32
             inst.height = nh + (pad or 0)
             inst._width = w
             if on_height is not None:
                 on_height(inst.height)
         lbl.bind(width=_follow)
-        lbl._meas = tw.Measurer(font_name, size)
         lbl._style = (font_name, size, halign, line_spacing, markup)
         lbl._width = width
         return lbl
@@ -572,8 +901,32 @@ class ReaderView(FloatLayout):
 
         # ── 图片 ──────────────────────────────────
         if cmd == "image":
-            holder = BoxLayout(orientation="vertical", size_hint_y=None,
-                               height=dp(76), padding=[0, dp(8), 0, dp(8)])
+            alt = block.get("alt") or "图片"
+            path = self.app.store.image_path(block.get("src") or "")
+            if not path:
+                holder = BoxLayout(orientation="vertical", size_hint_y=None,
+                                   height=dp(54), padding=[0, dp(6), 0, dp(6)])
+                holder.add_widget(Label(
+                    text="［图片未找到：%s］" % alt, font_name=FONT,
+                    font_size=sp(12.5), color=c.c("muted"), markup=False))
+                return holder
+            try:
+                tex = CoreImage(path).texture
+            except Exception:
+                tex = None
+            if tex is None:
+                return None
+            iw, ih = tex.size
+            if iw <= 0 or ih <= 0:
+                return None
+            scale = min(1.0, avail / float(iw))      # 不放大小图，避免糊
+            dw, dh = iw * scale, ih * scale
+            holder = FloatLayout(size_hint_x=1, size_hint_y=None,
+                                 height=dh + dp(20))
+            img = Image(texture=tex, size_hint=(None, None), size=(dw, dh),
+                        allow_stretch=True, keep_ratio=True, mipmap=True)
+            img.pos_hint = {"center_x": 0.5, "center_y": 0.5}
+            holder.add_widget(img)
             return holder
 
         return None
@@ -605,6 +958,31 @@ class ReaderView(FloatLayout):
         self.save_ev = None
         if self.doc_rel:
             self.app.store.set_progress(self.doc_rel, self.progress)
+
+    # ── 手绘批注（圈点） ────────────────────────────
+    def set_ink_mode(self, on):
+        """进入/退出批注模式。批注模式下禁止滚动，免得画着画着页面跑了。"""
+        self.ink_mode = bool(on)
+        if self.ink is not None:
+            self.ink.disabled = not self.ink_mode
+        try:
+            self.scroll.do_scroll_y = not self.ink_mode
+        except Exception:
+            pass
+        return self.ink_mode
+
+    def toggle_ink_mode(self):
+        return self.set_ink_mode(not self.ink_mode)
+
+    def clear_ink(self):
+        if self.ink is not None:
+            self.ink.clear()
+            self.app.toast("批注已清空")
+
+    def undo_ink(self):
+        if self.ink is not None:
+            self.ink.undo()
+            self.app.toast("已撤销一笔")
 
     # ── 字号 ────────────────────────────────────────
     def bump_font(self, delta):
