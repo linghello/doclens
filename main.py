@@ -300,3 +300,11 @@ if __name__ == "__main__":
                 app.root = _build_error_widget(tb)
         except Exception:
             pass
+    else:
+        # 正常退出（用户关闭 / 系统销毁 Activity）。run() 返回后，p4a 还会走
+        # sys.exit -> Py_Exit -> exit -> __cxa_finalize；在 MIUI/HyperOS 上这一步
+        # 常因 pyjnius / android 等 JNI 桥的 atexit / 析构函数指针损坏而 SIGSEGV
+        # （抓到的 tombstone 正是这个栈）。这里在 Python 层直接硬退出，跳过那段
+        # C 层收尾，避免退出时闪崩。数据在每个操作后用 flush() 落盘，硬退出安全。
+        if platform == "android":
+            os._exit(0)
