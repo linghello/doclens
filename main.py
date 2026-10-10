@@ -8,6 +8,12 @@
 import os
 import sys
 
+# 原生崩溃（SIGSEGV）Python 的 try/except 抓不到，但 faulthandler 会在
+# 收到信号的瞬间把「当时执行到哪一行 Python」打到 stderr（p4a 重定向到 logcat），
+# 帮我们定位是哪句 Python 触发了原生崩溃。必须尽早启用。
+import faulthandler
+faulthandler.enable()
+
 # 让 core / screens 能被 import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -280,4 +286,17 @@ class DocLens(App):
 
 
 if __name__ == "__main__":
-    DocLens().run()
+    try:
+        DocLens().run()
+    except Exception:
+        # 覆盖 App.run() 初始化阶段（build 之前）抛出的 Python 异常
+        tb = traceback.format_exc()
+        _write_crash(tb)
+        Logger.error("DocLens: App.run() 抛出异常：\n%s", tb)
+        try:
+            from kivy.app import App
+            app = App.get_running_app()
+            if app is not None and app.root is None:
+                app.root = _build_error_widget(tb)
+        except Exception:
+            pass
