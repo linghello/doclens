@@ -208,7 +208,11 @@ class Shell(FloatLayout):
     def show_sheet(self, title, widget, height):
         if self._sheet is not None:
             self._sheet.dismiss()
-        sheet = BottomSheet(title=title)
+        c = self.app.theme
+        # 弹层底色 / 标题色必须按主题给：Card 默认纯白、Label 默认白字，
+        # 不传的话深色主题下一片白、浅色主题下标题隐形。
+        sheet = BottomSheet(title=title, bg_color=c.c("surface"),
+                            title_color=c.c("text"))
         sheet.size_hint = (1, 1)
         sheet.set_body(widget, height)
         sheet.open(self)

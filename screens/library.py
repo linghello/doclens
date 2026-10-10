@@ -257,22 +257,32 @@ class LibraryView(BoxLayout):
     # ── 骨架（顶栏 + 搜索） ──────────────────────────
     def _build_scaffold(self):
         c = self.app.theme
-        self.bar = AppBar(title="文档库", appbar_bg=c.c("bg"), elevation=0)
-        self.add_widget(self.bar)
-
         head = BoxLayout(orientation="vertical", size_hint_y=None,
-                         padding=[dp(18), 0, dp(14), dp(10)], spacing=dp(10))
-        trow = BoxLayout(size_hint_y=None, height=dp(34))
+                         padding=[dp(18), dp(14), dp(14), dp(10)], spacing=dp(10))
+        trow = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
         big = Label(text="我的文档", font_name=FONT, font_size=sp(24), bold=True,
                     color=c.c("text"), halign="left", valign="middle", markup=False)
         big.bind(size=lambda i, v: setattr(i, "text_size", (i.width, None)))
         trow.add_widget(big)
+        # 设置入口：右上角一个看得见、点得到的胶囊按钮。
+        # （以前只有左下角一个 42dp 的齿轮图标 —— 在 1080p 屏上小成一个点，
+        #   而且 ⚙ 字形也未必在子集化字体里，导致用户根本找不到设置。）
+        gear = IconButton(icon="设置", size=(dp(76), dp(36)), font_size=sp(14),
+                          icon_color=c.c("text2"), base_color=c.c("surface3"),
+                          radius_ratio=0.45)
+        gear.size_hint = (None, None)
+        gear.bind(on_release=lambda *a: self.app.settings_sheet())
+        trow.add_widget(gear)
         head.add_widget(trow)
 
         srow = BoxLayout(size_hint_y=None, height=dp(46),
                          padding=[0, 0, 0, 0], spacing=dp(10))
         self.search = SearchField(surface_bg=c.c("surface"), outline=c.c("divider"),
-                                  outline_w=dp(1))
+                                  outline_w=dp(1),
+                                  icon_color=c.c("text2"),
+                                  entry_text_color=c.c("text"),
+                                  hint_text_color=c.c("muted"),
+                                  cursor_color=c.c("primary"))
         self.search.bind(text=self._on_query)
         srow.add_widget(self.search)
         add = IconButton(icon="＋", size=(dp(46), dp(46)), font_size=sp(22),
@@ -282,7 +292,7 @@ class LibraryView(BoxLayout):
         srow.add_widget(add)
         head.add_widget(srow)
         # 高度按子项累加，别再写死 —— 写死会和实际内容错位，标题被顶栏压住
-        head.height = dp(34) + dp(46) + dp(10) + head.padding[1] + head.padding[3]
+        head.height = dp(40) + dp(46) + dp(10) + head.padding[1] + head.padding[3]
         self.add_widget(head)
 
         fl = BoxLayout(size_hint_y=None, height=dp(38), padding=[dp(18), 0, dp(14), 6],

@@ -279,6 +279,10 @@ class AppBar(Surface, BoxLayout):
     title = StringProperty("")
     subtitle = StringProperty("")
     appbar_bg = ListProperty([1, 1, 1, 1])   # 避开 Widget.bg 的尺寸别名
+    # ⚠️ Label 的默认颜色是白色！浅色主题下不显式设色 = 「白纸上的白字」，
+    # 整个顶栏标题直接隐形（这就是「白色主题挡住字」的元凶之一）。
+    title_color = ListProperty([0.08, 0.10, 0.15, 1])
+    subtitle_color = ListProperty([0.36, 0.39, 0.47, 1])
 
     def __init__(self, **kw):
         if "surface_bg" not in kw:
@@ -298,15 +302,18 @@ class AppBar(Surface, BoxLayout):
         self.add_widget(self.right_box)
         self._t = Label(text=self.title, font_name=FONT, font_size=sp(17),
                         bold=True, halign="left", valign="middle", markup=False,
-                        shorten=True, shorten_from="right")
+                        shorten=True, shorten_from="right",
+                        color=self.title_color)
         self._t.bind(size=lambda *a: setattr(self._t, "text_size", (self._t.width, None)))
         self.center_box.add_widget(self._t)
         if self.subtitle:
             self._s = Label(text=self.subtitle, font_name=FONT, font_size=sp(11),
-                            halign="left", valign="middle", markup=False)
+                            halign="left", valign="middle", markup=False,
+                            color=self.subtitle_color)
             self._s.bind(size=lambda *a: setattr(self._s, "text_size", (self._s.width, None)))
             self.center_box.add_widget(self._s)
-        self.bind(title=lambda *a: setattr(self._t, "text", self.title))
+        self.bind(title=lambda *a: setattr(self._t, "text", self.title),
+                  title_color=lambda *a: setattr(self._t, "color", self.title_color))
 
     def add_right(self, widget):
         self.right_box.add_widget(widget)
@@ -323,6 +330,12 @@ class SearchField(Surface, BoxLayout):
 
     hint = StringProperty("搜索文档…")
     text = StringProperty("")
+    # ⚠️ 颜色按主题传入。Label 默认白字（放大镜会隐形）；
+    # TextInput 的 foreground/hint 若写死深色，深色主题下同样看不见。
+    icon_color = ListProperty([0.45, 0.48, 0.56, 1])
+    entry_text_color = ListProperty([0.10, 0.10, 0.15, 1])
+    hint_text_color = ListProperty([0.60, 0.62, 0.68, 1])
+    cursor_color = ListProperty([0.31, 0.27, 0.90, 1])
 
     def __init__(self, **kw):
         if "surface_bg" not in kw:
@@ -337,14 +350,16 @@ class SearchField(Surface, BoxLayout):
             text="", hint_text=hint, multiline=False,
             font_name=FONT, font_size=sp(15), background_normal="",
             background_active="", background_color=[0, 0, 0, 0],
-            foreground_color=[0.1, 0.1, 0.15, 1], cursor_color=[0.3, 0.3, 0.9, 1],
+            foreground_color=self.entry_text_color,
+            cursor_color=self.cursor_color,
             padding=[dp(6), dp(12), dp(6), dp(12)], size_hint=(1, 1),
-            hint_text_color=[0.6, 0.62, 0.68, 1], write_tab=False,
+            hint_text_color=self.hint_text_color, write_tab=False,
         )
         self.padding = [dp(12), 0, dp(6), 0]
         self.spacing = dp(6)
         self._ico = Label(text="⌕", font_name=FONT, font_size=sp(19),
-                          size_hint=(None, 1), width=dp(24), markup=False)
+                          size_hint=(None, 1), width=dp(24), markup=False,
+                          color=self.icon_color)
         self._clr = IconButton(icon="✕", size=(dp(30), dp(30)), font_size=sp(15),
                                base_color=[0, 0, 0, 0])
         self._clr.bind(on_release=lambda *a: self._clear())
@@ -516,6 +531,11 @@ class EmptyState(BoxLayout):
                  color=None, accent=None, **kw):
         super().__init__(**kw)
         self.orientation = "vertical"
+        # ⚠️ 必须定高：空状态被塞进 size_hint_y=None + minimum_height 的纵向
+        # BoxLayout，那里 size_hint_y 仍是默认 1 的子控件分到的高度是 0
+        # → 整个空状态（插画 + 文案）完全不显示，页面上只剩一片空白。
+        self.size_hint_y = None
+        self.height = dp(360)
         self.spacing = dp(10)
         self.add_widget(Widget(size_hint=(1, 0.2)))
         glyph = _DocGlyph(color=accent or [0.31, 0.27, 0.9, 1])
@@ -619,6 +639,11 @@ class Toast(Surface, BoxLayout):
 class BottomSheet(FloatLayout):
     """从底部滑出的模态面板：半透明遮罩 + 圆角面板。"""
 
+    # ⚠️ 面板底色 / 标题色必须由调用方按主题传入：Card 默认是纯白、
+    # Label 默认是白字 —— 不传的话深色主题下一片白、浅色主题下标题隐形。
+    bg_color = ListProperty([1, 1, 1, 1])
+    title_color = ListProperty([0.08, 0.10, 0.15, 1])
+
     def __init__(self, title="", **kw):
         super().__init__(**kw)
         self._scrim_color = Color(rgba=[0, 0, 0, 0])
@@ -628,6 +653,7 @@ class BottomSheet(FloatLayout):
         self.bind(size=self._sync_scrim, pos=self._sync_scrim)
 
         self.panel = Card(orientation="vertical", size_hint=(1, None),
+                          surface_bg=self.bg_color,
                           padding=[dp(18), dp(14), dp(18), dp(18)])
         self.panel.pos_hint = {"x": 0}
         self.panel.radius = [dp(26), dp(26), 0, 0]
@@ -641,7 +667,8 @@ class BottomSheet(FloatLayout):
                              size=(dp(24), dp(3)), radius=[1.5] * 4)
         head.add_widget(grab)
         self.title_lbl = Label(text=title, font_name=FONT, font_size=sp(15),
-                               bold=True, halign="left", markup=False)
+                               bold=True, halign="left", markup=False,
+                               color=self.title_color)
         self.title_lbl.bind(size=lambda *a: setattr(self.title_lbl, "text_size",
                                                     (self.title_lbl.width, None)))
         head.add_widget(self.title_lbl)

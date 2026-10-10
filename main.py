@@ -24,10 +24,27 @@ except Exception:
 # 让 core / screens 能被 import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# 桌面端固定 1dp = 1px（本机 DPI 175%，不固定的话窗口会变成 700x1453）。
-# 必须在 import kivy 之前设置。
+# 密度（dp/sp 的换算基准）必须在 import kivy 之前定好，否则整个界面尺寸全错：
+#   桌面：固定 1dp = 1px（本机 DPI 175%，不固定窗口会变成 700x1453）；
+#   安卓：必须显式给出真实密度！Kivy 在 SDL2 引导下自动取密度时会去 autoclass
+#         'org.renpy.android.Hardware'（那是老 pygame 引导才有的类），拿不到；
+#         而若放任为 1，界面就只有应有的 1/密度 大 —— 440dpi 屏（2.75 倍）上
+#         字小到看不清、按钮变成一个点。
+_IS_ANDROID = bool(os.environ.get("ANDROID_ARGUMENT")
+                   or os.environ.get("ANDROID_BOOTLOGO"))
 if not os.environ.get("KIVY_METRICS_DENSITY"):
-    os.environ["KIVY_METRICS_DENSITY"] = "1"
+    if _IS_ANDROID:
+        _dens = 2.0  # 兜底：常见中高密度屏
+        try:
+            from jnius import autoclass  # type: ignore
+            _dm = autoclass("org.kivy.android.PythonActivity").mActivity \
+                .getResources().getDisplayMetrics()
+            _dens = float(_dm.density)
+        except Exception:
+            pass
+        os.environ["KIVY_METRICS_DENSITY"] = "%.3f" % _dens
+    else:
+        os.environ["KIVY_METRICS_DENSITY"] = "1"
 
 from kivy.config import Config  # noqa: E402
 
