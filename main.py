@@ -29,6 +29,66 @@ from kivy.core.window import Window  # noqa: E402
 from kivy.logger import Logger  # noqa: E402
 from kivy.utils import platform  # noqa: E402
 
+import sys
+import traceback
+
+# ── 启动崩溃捕获 ────────────────────────────────────
+# 安卓上 p4a 把 Python stderr 重定向到 logcat（python 标签），但红米等机器的
+# 环形缓冲只有几秒，真正的 traceback 会被冲掉；未捕获的异常还会一路冒泡到
+# 原生层 Py_Exit -> Py_Finalize，触发 SIGSEGV（SDLThread），反而看不到根因。
+# 这里把异常抓住：写文件 + 在屏幕上显示，既避免闪退，也让根因一目了然。
+def _crash_path():
+    try:
+        a = App.get_running_app()
+        if a and getattr(a, "user_data_dir", None):
+            return os.path.join(a.user_data_dir, "doclens_crash.txt")
+    except Exception:
+        pass
+    return os.path.join(os.path.expanduser("~"), "doclens_crash.txt")
+
+
+def _write_crash(text):
+    try:
+        with open(_crash_path(), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        Logger.warning("DocLens: 已把启动错误写入 %s", _crash_path())
+    except Exception as exc:
+        Logger.warning("DocLens: 写崩溃日志失败 %s", exc)
+
+
+def _crash_excepthook(etype, exc, tb):
+    _write_crash("".join(traceback.format_exception(etype, exc, tb)))
+
+
+sys.excepthook = _crash_excepthook
+
+
+def _build_error_widget(tb_text):
+    """用红色错误屏把 traceback 直接画出来，方便截图回传。"""
+    from kivy.uix.boxlayout import BoxLayout
+    from kivy.uix.label import Label
+    from kivy.uix.scrollview import ScrollView
+
+    root = BoxLayout(orientation="vertical")
+    hdr = Label(
+        text="DocLens 启动失败 —— 请把下方内容截图发给开发者",
+        font_name="Roboto", color=(1, 0.42, 0.42, 1),
+        size_hint_y=None, height=46, halign="left", valign="middle",
+        text_size=(Window.width or 360, None),
+    )
+    sv = ScrollView()
+    lab = Label(
+        text=tb_text, font_name="Roboto",
+        color=(0.95, 0.95, 0.97, 1),
+        halign="left", valign="top", markup=False,
+        text_size=(Window.width or 360, None),
+    )
+    sv.add_widget(lab)
+    root.add_widget(hdr)
+    root.add_widget(sv)
+    return root
+
+
 BASE = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(BASE, "assets")
 FONT_DIR = os.path.join(ASSETS, "fonts")
@@ -82,6 +142,15 @@ class DocLens(App):
     title = "DocLens"
 
     def build(self):
+        try:
+            return self._build_ui()
+        except Exception:
+            tb = traceback.format_exc()
+            _write_crash(tb)
+            Logger.error("DocLens: build() 抛出异常：\n%s", tb)
+            return _build_error_widget(tb)
+
+    def _build_ui(self):
         from app import DocLensApp, Shell
 
         if platform not in ("android", "ios"):
@@ -108,15 +177,34 @@ class DocLens(App):
     def on_start(self):
         # Android 从「分享到」或文件关联进来的路径
         if platform == "android":
-            self._handle_android_intent()
+            try:
+                self._handle_android_intent()
+            except Exception:
+                tb = traceback.format_exc()
+                _write_crash(tb)
+                Logger.error("DocLens: on_start 处理 Intent 失败：\n%s", tb)
 
     # ── 启动收尾 ────────────────────────────────────
     def _startup(self):
-        if platform not in ("android", "ios"):
-            self._load_desktop_samples()
-        self.ui.library.refresh()
-        self.ui.library.animate_in()
-        Clock.schedule_once(lambda dt: self.core.maybe_first_hint(), 1.2)
+        try:
+            if platform not in ("android", "ios"):
+                self._load_desktop_samples()
+            self.ui.library.refresh()
+            self.ui.library.animate_in()
+            Clock.schedule_once(lambda dt: self.core.maybe_first_hint(), 1.2)
+        except Exception:
+            tb = traceback.format_exc()
+            _write_crash(tb)
+            Logger.error("DocLens: _startup 抛出异常：\n%s", tb)
+            # 尽量把错误显示在界面上（build 已成功时 ui 存在）
+            try:
+                if getattr(self, "ui", None) is not None:
+                    from kivy.uix.widget import Widget
+                    err = _build_error_widget(tb)
+                    self.ui.clear_widgets()
+                    self.ui.add_widget(err)
+            except Exception:
+                pass
 
     def _load_desktop_samples(self):
         """桌面首次运行时塞两篇示例文档，方便直接看到效果。"""
