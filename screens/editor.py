@@ -18,7 +18,7 @@ from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.textinput import TextInput
 
 from core import android as droid
-from core.widgets import AppBar, FONT, IconButton, ModernButton
+from core.widgets import AppBar, FONT, IconButton, ModernButton, PageBackground
 
 TEMPLATE = "# 未命名\n\n在这里写下第一行文字。\n"
 
@@ -34,18 +34,15 @@ class EditorView(FloatLayout):
         self.doc_title = title or ("新建文档" if self.is_new else "编辑")
         c = app.theme
 
-        with self.canvas.before:
-            self._bg_c = Color(rgba=c.c("bg"))
-            self._bg_r = Rectangle()
-        self.bind(pos=self._sync_bg, size=self._sync_bg)
-        self._sync_bg()
+        # 底色 + 全局背景图（和书架/阅读器保持一致）
+        self._bg = PageBackground(self, c, app.global_bg_style)
 
         root = BoxLayout(orientation="vertical")
         self.add_widget(root)
 
-        # ── 顶栏 ────────────────────────────────────
-        bar = AppBar(title=self.doc_title, appbar_bg=c.c("bg"), elevation=0,
-                     title_color=c.c("text"))
+        # ── 顶栏（半透明，做出毛玻璃感） ────────────
+        bar = AppBar(title=self.doc_title, appbar_bg=c.c("surface", 0.88),
+                     elevation=0, title_color=c.c("text"))
         back = IconButton(icon="←", size=(dp(40), dp(40)), font_size=sp(20),
                           icon_color=c.c("text"))
         back.bind(on_release=lambda *a: self.close())
@@ -97,10 +94,6 @@ class EditorView(FloatLayout):
         self.input.bind(text=self._on_change)
 
     # ── 基础 ────────────────────────────────────────
-    def _sync_bg(self, *a):
-        self._bg_r.pos = self.pos
-        self._bg_r.size = self.size
-
     def _on_change(self, *a):
         self._dirty = True
 

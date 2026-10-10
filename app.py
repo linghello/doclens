@@ -19,7 +19,7 @@ from core.store import Store, TEXT_EXT
 from core.theme import READER_FONT_MAX, READER_FONT_MIN, Theme
 from core.widgets import (
     AppBar, BottomSheet, Card, Divider, FONT, IconButton,
-    ModernButton, ProgressLine, Surface, Toast,
+    ModernButton, PageBackground, ProgressLine, Surface, Toast,
 )
 from screens.library import LibraryView
 from screens.reader import ReaderView
@@ -50,12 +50,8 @@ class Shell(FloatLayout):
     def __init__(self, app, **kw):
         super().__init__(**kw)
         self.app = app
-        # 整页底色：不铺的话深色主题下会露出浅色窗口底
-        with self.canvas.before:
-            self._page_c = Color(rgba=app.theme.c("bg"))
-            self._page_r = Rectangle()
-        self.bind(pos=self._sync_page_bg, size=self._sync_page_bg)
-        self._sync_page_bg()
+        # 整页底色 + 全局背景图（不铺的话深色主题下会露出浅色窗口底）
+        self._bg = PageBackground(self, app.theme, app.global_bg_style)
         self.reader = None
         self.editor = None
         self.library = LibraryView(app)
@@ -64,13 +60,9 @@ class Shell(FloatLayout):
         self._toast = None
         self._build_settings_button()
 
-    def _sync_page_bg(self, *a):
-        self._page_r.pos = self.pos
-        self._page_r.size = self.size
-
     def restyle(self):
-        """换肤后刷新整页底色。"""
-        self._page_c.rgba = self.app.theme.c("bg")
+        """换肤后刷新整页底色 + 背景图。"""
+        self._bg.refresh()
 
     def _build_settings_button(self):
         """左下角的设置入口（齿轮）。"""
@@ -130,7 +122,7 @@ class Shell(FloatLayout):
         rv.add_widget(overlay)
         rv.overlay = overlay
 
-        bar = rv._reader_bar = AppBar(appbar_bg=self.app.theme.c("surface"),
+        bar = rv._reader_bar = AppBar(appbar_bg=self.app.theme.c("surface", 0.86),
                                       elevation=0)
         bar.size_hint = (1, None)
         bar.pos_hint = {"top": 1}
@@ -191,7 +183,7 @@ class Shell(FloatLayout):
     def _reader_dock(self, rv):
         c = self.app.theme
         holder = FloatLayout(size_hint=(1, 1))
-        card = Card(orientation="vertical", surface_bg=c.c("surface"),
+        card = Card(orientation="vertical", surface_bg=c.c("surface", 0.88),
                     radius=[dp(21)] * 4, elevation=2, padding=[dp(4)] * 4,
                     spacing=dp(4), size_hint=(None, None),
                     size=(dp(42), dp(42) * 3 + dp(8)),
@@ -226,9 +218,8 @@ class Shell(FloatLayout):
         if self._sheet is not None:
             self._sheet.dismiss()
         c = self.app.theme
-        # 弹层底色 / 标题色必须按主题给：Card 默认纯白、Label 默认白字，
-        # 不传的话深色主题下一片白、浅色主题下标题隐形。
-        sheet = BottomSheet(title=title, bg_color=c.c("surface"),
+        # 弹层底色半透明（毛玻璃感）；Card 默认纯白、Label 默认白字，都必须显式给
+        sheet = BottomSheet(title=title, bg_color=c.c("surface", 0.95),
                             title_color=c.c("text"))
         sheet.size_hint = (1, 1)
         sheet.set_body(widget, height)
@@ -480,7 +471,7 @@ class DocLensApp(object):
             return lbl
 
         body = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10))
-        body.add_widget(_tip("给这篇文档配一张半透明背景图（只影响这一篇）", 12.5))
+        body.add_widget(_tip("只给这一篇换背景（默认跟随「设置 → 全局背景」）", 12.5))
 
         pick = ModernButton(text=("更换背景图" if cur.get("bg") else "选择背景图"),
                             surface_bg=c.c("surface3"), text_color=c.c("text"),
@@ -566,6 +557,57 @@ class DocLensApp(object):
                 on_change()
             except Exception:
                 pass
+
+    # ── 全局背景（整个 App 的底图） ─────────────────
+    def global_bg_style(self):
+        """给 PageBackground 用：{'path': 绝对路径 or None, 'opacity': 0..1}"""
+        try:
+            rel = self.store.global_bg()
+            path = self.store.image_path(rel) if rel else None
+            return {"path": path, "opacity": self.store.global_bg_opacity()}
+        except Exception:
+            return {"path": None, "opacity": 0.22}
+
+    def refresh_backgrounds(self):
+        """全局背景变了：三个全屏层（书架 / 阅读器 / 编辑器）一起刷新。"""
+        ui = getattr(self._app, "ui", None)
+        if ui is None:
+            return
+        for w in (ui, getattr(ui, "reader", None), getattr(ui, "editor", None)):
+            if w is None:
+                continue
+            try:
+                w._bg.refresh()
+            except Exception:
+                pass
+
+    def _on_bg_opacity_changed(self, inst, value):
+        self.store.set_global_bg(opacity=value)
+        self.refresh_backgrounds()
+        lbl = getattr(self, "_bg_val_lbl", None)
+        if lbl is not None:
+            lbl.text = "%d%%" % int(value * 100)
+
+    def _on_global_bg_picked(self, items):
+        if not items:
+            return
+        try:
+            rel = self.store.import_image(items[0][1])
+        except Exception as exc:
+            self.toast("设置失败：%s" % exc)
+            return
+        self.store.set_global_bg(rel=rel)
+        self.refresh_backgrounds()
+        self.toast("全局背景已设置")
+
+    def _clear_global_bg(self):
+        self.store.set_global_bg(rel=None)
+        self.refresh_backgrounds()
+        ui = getattr(self._app, "ui", None)
+        if ui is not None and getattr(ui, "_sheet", None) is not None:
+            ui._sheet.dismiss()
+            ui._sheet = None
+        self.toast("已移除全局背景")
 
     def doc_menu(self, doc, anchor):
         c = self.theme
@@ -758,13 +800,61 @@ class DocLensApp(object):
         body.add_widget(frow)
 
         body.add_widget(Divider(color=c.c("divider")))
+
+        # ── 全局背景（整个 App 的底图，可调透明度） ──
+        body.add_widget(self._kv_label("全局背景", bold=True))
+        gb = self.store.global_bg()
+        pick = ModernButton(text=("更换背景图" if gb else "选择背景图"),
+                            surface_bg=c.c("surface3"), text_color=c.c("text"),
+                            size_hint_y=None, height=dp(46),
+                            radius=[dp(13)] * 4)
+        pick.bind(on_release=lambda *a: droid.pick_files(
+            self._on_global_bg_picked, allow_multiple=False, images_only=True))
+        body.add_widget(pick)
+
+        orow = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(8))
+        olbl = Label(text="不透明度", font_name=FONT, font_size=sp(13.5),
+                     color=c.c("text2"), halign="left", valign="middle",
+                     markup=False)
+        olbl.bind(size=lambda i, v: setattr(i, "text_size", (i.width, None)))
+        val = Label(text="%d%%" % int(self.store.global_bg_opacity() * 100),
+                    font_name=FONT, font_size=sp(13.5), color=c.c("text"),
+                    halign="right", valign="middle", markup=False,
+                    size_hint=(None, 1), width=dp(56))
+        self._bg_val_lbl = val
+        orow.add_widget(olbl)
+        orow.add_widget(val)
+        body.add_widget(orow)
+
+        try:
+            from kivy.uix.slider import Slider
+            from kivy.graphics import Color as _C, RoundedRectangle as _RR
+            sl = Slider(min=0.05, max=0.85, step=0.01,
+                        value=self.store.global_bg_opacity(),
+                        size_hint_y=None, height=dp(36))
+            sl.bind(value=self._on_bg_opacity_changed)
+            body.add_widget(sl)
+            slider_added = True
+        except Exception:
+            slider_added = False
+
+        gb_extra = 0
+        if gb:
+            rm = ModernButton(text="移除背景图", surface_bg=c.c("surface3"),
+                              text_color=c.c("accent"), size_hint_y=None,
+                              height=dp(44), radius=[dp(13)] * 4)
+            rm.bind(on_release=lambda *a: self._clear_global_bg())
+            body.add_widget(rm)
+            gb_extra = dp(52)
+
+        body.add_widget(Divider(color=c.c("divider")))
         docs = self.store.list_docs()
         usage = self.store.storage_usage()
         info = "共 %d 份文档 · 占用 %.1f KB" % (len(docs), usage / 1024.0)
         body.add_widget(self._kv_label(info, color=c.c("text2")))
         body.add_widget(self._kv_label("DocLens v1.0 · 本地纯离线阅读器，不要任何权限",
                                        color=c.c("muted"), size=11.5))
-        body.height = dp(300)
+        body.height = dp(470) + gb_extra + (dp(36) if slider_added else 0)
         ui = getattr(self._app, "ui", None)
         ui.show_sheet("设置", body, body.height)
 

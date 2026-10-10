@@ -40,7 +40,7 @@ class Store:
         self.state = self._load(self.state_path, {
             "favorites": [], "progress": {}, "theme": "system",
             "font_scale": 1.0, "history": [], "first_run": True,
-            "styles": {},
+            "styles": {}, "global_bg": None, "global_bg_opacity": 0.22,
         })
         self._cache = self._load(self.cache_path, {})
         self._dirty = False
@@ -209,6 +209,26 @@ class Store:
             return dict(self.state.get("styles", {}).get(rel, {}))
         except Exception:
             return {}
+
+    # ── 全局背景（整个 App 的背景图） ───────────────
+    def global_bg(self):
+        return self.state.get("global_bg")
+
+    def global_bg_opacity(self):
+        try:
+            return float(self.state.get("global_bg_opacity", 0.22) or 0.22)
+        except Exception:
+            return 0.22
+
+    def set_global_bg(self, rel="__keep__", opacity=None):
+        """rel 传 None 表示移除背景图；传路径（images/xxx）表示设置。"""
+        if rel != "__keep__":
+            self.state["global_bg"] = rel or None
+        if opacity is not None:
+            self.state["global_bg_opacity"] = round(
+                max(0.0, min(0.95, float(opacity))), 3)
+        self._dirty = True
+        self.flush()
 
     def set_doc_style(self, rel, **kw):
         styles = self.state.setdefault("styles", {})

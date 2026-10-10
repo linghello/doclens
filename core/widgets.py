@@ -13,6 +13,7 @@ from kivy.graphics import (
     Color,
     Ellipse,
     Line,
+    Rectangle,
     RoundedRectangle,
     StencilPop,
     StencilPush,
@@ -41,6 +42,7 @@ __all__ = [
     "FONT", "Surface", "Card", "RippleBehavior", "ModernButton", "IconButton",
     "AppBar", "SearchField", "Chip", "Divider", "EmptyState", "Toast",
     "BottomSheet", "ProgressLine", "TypeBadge", "SectionTitle", "IconLabel",
+    "PageBackground",
 ]
 
 
@@ -723,3 +725,66 @@ class ContentScroll(ScrollView):
         kw.setdefault("scroll_type", ["content", "bars"])
         kw.setdefault("do_scroll_x", False)
         super().__init__(**kw)
+
+
+# ── 页面背景（全局背景图） ──────────────────────────────
+class PageBackground(object):
+    """页面背景层：主题底色 + 可选背景图（cover 铺满、半透明、可调）。
+
+    挂在任意 Widget 的 canvas.before 上；换图或改透明度后调 ``refresh()``。
+    Kivy 里没有现成的「背景图 + 遮罩」，所以这里手动两张：底色矩形 + 图片矩形，
+    图片按 cover 比例居中，透明度由主题底色的补色叠加控制（见 ``opacity``）。
+    """
+
+    def __init__(self, widget, theme, get_style):
+        from kivy.core.image import Image as CoreImage  # noqa: F401
+        self.widget = widget
+        self.theme = theme
+        self._get_style = get_style
+        self._path = None
+        self._tex = None
+        self._opacity = 0.22
+        with widget.canvas.before:
+            self._c = Color(rgba=theme.c("bg"))
+            self._r = Rectangle()
+            self._ic = Color(rgba=[1, 1, 1, 0])
+            self._ir = Rectangle(texture=None)
+        widget.bind(pos=self.sync, size=self.sync)
+        self.refresh()
+
+    def refresh(self):
+        st = self._get_style() or {}
+        path = st.get("path")
+        self._opacity = float(st.get("opacity", 0.22) or 0.22)
+        if path != self._path:
+            self._path = path
+            self._tex = None
+            if path:
+                try:
+                    from kivy.core.image import Image as CoreImage
+                    self._tex = CoreImage(path).texture
+                except Exception:
+                    self._tex = None
+        self.sync()
+
+    def sync(self, *a):
+        wdg = self.widget
+        x, y = wdg.pos
+        sw, sh = wdg.size
+        self._c.rgba = self.theme.c("bg")
+        self._r.pos = (x, y)
+        self._r.size = (sw, sh)
+        tex = self._tex
+        if tex is None or sw <= 1 or sh <= 1:
+            self._ic.rgba = [1, 1, 1, 0]
+            self._ir.texture = None
+            return
+        tw_, th_ = tex.size
+        if tw_ <= 0 or th_ <= 0:
+            return
+        scale = max(sw / float(tw_), sh / float(th_))     # cover：铺满不留边
+        dw, dh = tw_ * scale, th_ * scale
+        self._ic.rgba = [1, 1, 1, self._opacity]
+        self._ir.texture = tex
+        self._ir.size = (dw, dh)
+        self._ir.pos = (x + (sw - dw) / 2.0, y + (sh - dh) / 2.0)

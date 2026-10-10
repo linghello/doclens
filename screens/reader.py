@@ -28,7 +28,7 @@ from kivy.uix.widget import Widget
 
 from core import mdrender, textwrap as tw
 from core.widgets import (
-    AppBar, Card, FONT, IconButton, ProgressLine, Surface,
+    AppBar, Card, FONT, IconButton, PageBackground, ProgressLine, Surface,
 )
 
 MONO = "AppMono"
@@ -99,14 +99,15 @@ class InkLayer(Widget):
     这样笔画再多也不会卡。
     """
 
-    def __init__(self, app, doc_rel, **kw):
+    def __init__(self, app, doc_rel, scroll=None, **kw):
         super().__init__(**kw)
         self.app = app
         self.doc_rel = doc_rel
+        self.scroll = scroll          # 用来换算滚动偏移（见 _offset）
         self.strokes = []                 # 归一化的已完成笔画
         self.color = [0.93, 0.27, 0.36, 1]
         self.stroke_w = dp(3.2)
-        self._cur = None                  # 正在画的（像素坐标）
+        self._cur = None                  # 正在画的（层内像素坐标）
         self.disabled = True              # 默认不拦截触摸
         with self.canvas.before:
             self._c_done = Color(rgba=self.color)
@@ -116,6 +117,28 @@ class InkLayer(Widget):
             self._live = Line(points=[], width=self.stroke_w,
                               joint="round", cap="round")
         self.bind(pos=self._relayout, size=self._relayout)
+
+    # ── 坐标换算 ────────────────────────────────
+    def _offset(self):
+        """当前滚动量（像素）。
+
+        ⚠️ 关键坑：Kivy 的 ScrollView 是**用 canvas 平移**实现滚动的 ——
+        子控件的 ``pos`` 永远不动（实测内容高 2841、视口 830 时 pos 仍是 0）。
+        所以触摸点必须补上这段平移才能换算成层内坐标，否则笔画会画到屏幕外面
+        （表现为：明明画了，屏幕上什么都没有）。
+        """
+        sv = self.scroll
+        if sv is None:
+            return 0.0
+        try:
+            extra = max(0.0, float(self.height) - float(sv.height))
+            return extra * float(sv.scroll_y)
+        except Exception:
+            return 0.0
+
+    def _touch_to_px(self, touch):
+        """窗口坐标 → 层内像素坐标。"""
+        return (touch.x - self.x, touch.y - self.y + self._offset())
 
     # ── 持久化 ──────────────────────────────────
     def _path(self):
@@ -143,9 +166,10 @@ class InkLayer(Widget):
 
     # ── 坐标 ────────────────────────────────────
     def _norm2px(self, nx, ny):
+        """归一化坐标（nx, ny 都是从层左下角算起）→ 层内像素。"""
         w = max(1.0, self.width)
         h = max(1.0, self.height)
-        return (self.x + nx * w, self.y + (1.0 - ny) * h)
+        return (self.x + nx * w, self.y + ny * h)
 
     def _pts(self, stroke):
         out = []
@@ -197,17 +221,17 @@ class InkLayer(Widget):
     def on_touch_down(self, touch):
         if self.disabled or not self.collide_point(*touch.pos):
             return False
-        self._cur = [(touch.x, touch.y)]
+        self._cur = [self._touch_to_px(touch)]      # 层内像素坐标
         self._live.points = list(self._cur)
         return True
 
     def on_touch_move(self, touch):
         if self.disabled or self._cur is None:
             return False
-        self._cur.append((touch.x, touch.y))
+        p = self._touch_to_px(touch)
+        self._cur.append(p)
         # 只更新 live 这一条，不重画全部笔画
-        pts = self._live.points
-        pts.extend((touch.x, touch.y))
+        self._live.points.extend(p)
         return True
 
     def on_touch_up(self, touch):
@@ -218,7 +242,8 @@ class InkLayer(Widget):
         self._live.points = []
         w = max(1.0, self.width)
         h = max(1.0, self.height)
-        norm = [((x - self.x) / w, 1.0 - (y - self.y) / h) for x, y in pts]
+        # 层内像素 → 归一化（都从层左下角量起，换字号/换宽度都不会跑位）
+        norm = [(x / w, y / h) for x, y in pts]
         if len(norm) >= 2:
             self.strokes.append(norm)
             self._new_line(self._pts(norm))
@@ -227,22 +252,51 @@ class InkLayer(Widget):
 
 
 class _LoadingOverlay(FloatLayout):
-    """打开文档时的等待层：一张「正在思考……」贴纸 + 上下轻浮动。"""
+    """打开文档时的等待层：播放加载动画（GIF 拆帧）+ 上下轻浮动。
+
+    Kivy 播不了 GIF，所以 GIF 在打包前就拆成了 JPEG 帧（assets/loading/frames），
+    运行时每 80ms 换一次纹理 —— 观感和 GIF 一致。
+    纹理按需加载并缓存；加载层撤掉时清空缓存，免得 56 帧纹理常驻内存。
+    """
 
     bob = NumericProperty(0.0)
 
     def __init__(self, app, **kw):
         super().__init__(**kw)
         self.app = app
+        self._anim = None
+        self._clock = None
+        self._cache = {}
+        self._idx = 0
         with self.canvas.before:
             self._c = Color(rgba=app.theme.c("bg"))
             self._r = Rectangle()
         self.bind(pos=self._sync_bg, size=self._sync_bg)
         self._sync_bg()
-        self._img = Image(source=os.path.join(ASSETS, "loading", "thinking.png"),
-                          size_hint=(None, None), allow_stretch=True,
-                          keep_ratio=True, mipmap=True)
-        self.add_widget(self._img)
+
+        fdir = os.path.join(ASSETS, "loading", "frames")
+        try:
+            self._frames = [os.path.join(fdir, n)
+                            for n in sorted(os.listdir(fdir))
+                            if n.lower().endswith((".jpg", ".png"))]
+        except Exception:
+            self._frames = []
+
+        # 圆角卡片：Card 自带 stencil 裁剪，能把不透明动画裁成圆角并加投影
+        self._card = Card(orientation="vertical", elevation=3,
+                          radius=[dp(20)] * 4, padding=[0, 0, 0, 0],
+                          surface_bg=[1, 1, 1, 0],
+                          shadow_color=app.theme.c("shadow", 0.35))
+        self._card.size_hint = (None, None)
+        self.add_widget(self._card)
+        if self._frames:
+            self._img = Image(size_hint=(1, 1), fit_mode="fill", mipmap=True)
+        else:                       # 兜底：老的单张静图
+            self._img = Image(source=os.path.join(ASSETS, "loading",
+                                                  "thinking.png"),
+                              size_hint=(1, 1), fit_mode="fill", mipmap=True)
+        self._card.add_widget(self._img)
+
         self._lbl = Label(text="正在打开文档…", font_name=FONT, font_size=sp(13.5),
                           color=app.theme.c("text2"), markup=False,
                           size_hint=(None, None), size=(dp(240), dp(24)),
@@ -251,23 +305,48 @@ class _LoadingOverlay(FloatLayout):
         self.bind(bob=lambda *a: self._sync_items(),
                   size=lambda *a: self._sync_items())
         self._sync_items()
-        self._anim = None
 
     def _sync_bg(self, *a):
         self._r.pos = self.pos
         self._r.size = self.size
 
     def _sync_items(self, *a):
-        iw = min(dp(230), max(dp(140), self.width * 0.52))
-        ih = iw * (428.0 / 420.0)
-        self._img.size = (iw, ih)
+        cw = min(dp(200), max(dp(120), self.width * 0.46))
+        ch = cw * (426.0 / 240.0)
         cx = self.width / 2.0
-        self._img.pos = (cx - iw / 2.0,
-                         self.height * 0.56 + self.bob * dp(12) - ih / 2.0)
-        self._lbl.pos = (cx - dp(120), self.height * 0.56 - ih / 2.0 - dp(40))
+        cy = self.height * 0.58 + self.bob * dp(12)
+        self._card.size = (cw, ch)
+        self._card.pos = (cx - cw / 2.0, cy - ch / 2.0)
+        self._lbl.pos = (cx - dp(120), cy - ch / 2.0 - dp(38))
+
+    # ── 帧动画 ──────────────────────────────────
+    def _tex(self, i):
+        t = self._cache.get(i)
+        if t is None:
+            try:
+                t = CoreImage(self._frames[i]).texture
+            except Exception:
+                t = None
+            if t is not None:
+                self._cache[i] = t
+        return t
+
+    def _tick(self, dt):
+        if not self._frames:
+            return
+        self._idx = (self._idx + 1) % len(self._frames)
+        t = self._tex(self._idx)
+        if t is not None:
+            self._img.texture = t
 
     def start(self):
         self.opacity = 1.0
+        if self._frames:
+            t = self._tex(0)
+            if t is not None:
+                self._img.texture = t
+            if self._clock is None:
+                self._clock = Clock.schedule_interval(self._tick, 0.08)
         try:
             self._anim = (Animation(bob=1.0, d=0.85, t="in_out_sine")
                           + Animation(bob=0.0, d=0.85, t="in_out_sine"))
@@ -283,6 +362,13 @@ class _LoadingOverlay(FloatLayout):
             except Exception:
                 pass
             self._anim = None
+        if self._clock is not None:
+            try:
+                self._clock.cancel()
+            except Exception:
+                pass
+            self._clock = None
+        self._cache.clear()          # 释放纹理（56 帧常驻太吃内存）
         anim = Animation(opacity=0.0, d=0.16, t="out_quad")
         if on_done is not None:
             anim.bind(on_complete=lambda *a: on_done())
@@ -317,60 +403,38 @@ class ReaderView(FloatLayout):
         self.ink = None
         self.ink_mode = False
         self._loading = None
-        self._bg_tex = None
-        # 不透明底色：否则会把下面的文档库透出来
-        with self.canvas.before:
-            self._bg_c = Color(rgba=app.theme.c("bg"))
-            self._bg_r = Rectangle()
-            self._bg_img_c = Color(rgba=[1, 1, 1, 0])
-            self._bg_img = Rectangle(texture=None)
-        self.bind(pos=self._sync_bg, size=self._sync_bg)
-        self._sync_bg()
+        # 不透明底色 + 背景图（否则会把下面的文档库透出来）
+        self._bg = PageBackground(self, app.theme, self._bg_style)
         # 内层滚动容器：正文全在这里面
         self.scroll = ScrollView(bar_width=dp(3), do_scroll_x=False,
                                  size_hint=(1, 1))
         self.scroll.bind(scroll_y=self._on_scroll_y)
         self.add_widget(self.scroll)
 
-    def _sync_bg(self, *a):
-        self._bg_r.pos = self.pos
-        self._bg_r.size = self.size
-        self._sync_bg_image()
-
-    def _sync_bg_image(self, *a):
-        """半透明背景图：按 cover 方式铺满整页。"""
-        tex = self._bg_tex
-        if tex is None:
-            self._bg_img_c.rgba = [1, 1, 1, 0]
-            self._bg_img.texture = None
-            return
-        self._bg_img_c.rgba = [1, 1, 1, float(self.style.get("bg_opacity", 0.22))]
-        tw_, th_ = tex.size
-        w, h = self.size
-        if tw_ <= 0 or th_ <= 0 or w <= 0 or h <= 0:
-            return
-        scale = max(w / float(tw_), h / float(th_))     # cover：铺满，不留边
-        dw, dh = tw_ * scale, th_ * scale
-        self._bg_img.texture = tex
-        self._bg_img.size = (dw, dh)
-        self._bg_img.pos = (self.x + (w - dw) / 2.0, self.y + (h - dh) / 2.0)
+    # ── 背景样式 ────────────────────────────────────
+    def _bg_style(self):
+        """本篇单独设了背景就用它，否则跟随「全局背景」。"""
+        st = {}
+        if self.doc_rel:
+            try:
+                st = self.app.store.doc_style(self.doc_rel)
+            except Exception:
+                st = {}
+        if st.get("bg"):
+            return {"path": self.app.store.image_path(st.get("bg")),
+                    "opacity": float(st.get("bg_opacity", 0.22) or 0.22)}
+        try:
+            return self.app.global_bg_style()
+        except Exception:
+            return {}
 
     def apply_style(self, style=None):
-        """应用该文档的个性化样式（半透明背景图等）。"""
-        self.style = (style if style is not None
-                      else self.app.store.doc_style(self.doc_rel))
-        path = self.app.store.image_path(self.style.get("bg") or "")
-        self._bg_tex = None
-        if path:
-            try:
-                self._bg_tex = CoreImage(path).texture
-            except Exception:
-                self._bg_tex = None
-        self._sync_bg_image()
+        """样式变了：刷新背景层（全局背景改动也会走到这里）。"""
+        self._bg.refresh()
 
     def restyle(self):
-        """换肤后被复用：刷新底色。"""
-        self._bg_c.rgba = self.app.theme.c("bg")
+        """换肤后被复用：刷新底色 + 背景图。"""
+        self._bg.refresh()
 
     # ── 生命周期 ────────────────────────────────────
     def load(self, rel, title=""):
@@ -480,11 +544,23 @@ class ReaderView(FloatLayout):
         self._labels = []
         wrap.add_widget(box)
 
-        ink = InkLayer(self.app, self.doc_rel, size_hint=(1, 1),
-                       pos_hint={"x": 0, "y": 0})
+        ink = InkLayer(self.app, self.doc_rel, scroll=self.scroll,
+                       size_hint=(1, None), pos_hint={"x": 0, "y": 0})
         ink.disabled = not self.ink_mode        # 平时不拦截触摸，能正常滚动
         wrap.add_widget(ink)
         self.ink = ink
+
+        def _fit_ink(*_a):
+            # ⚠️ 批注层至少要铺满视口：否则短文档（正文不足一屏）时批注层
+            #    只有正文那么高，正文下方的空白区就圈点不了 —— 实测内容高 265、
+            #    视口 830 时，手指点在下半屏根本不响应。
+            try:
+                ink.height = max(dp(1), self.box.height, self.scroll.height)
+            except Exception:
+                ink.height = self.box.height or dp(1)
+        self.box.bind(height=_fit_ink)
+        self.scroll.bind(height=_fit_ink)
+        _fit_ink()
         ink.load()
 
         c = self.app.theme
