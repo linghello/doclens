@@ -17,6 +17,7 @@ on:
       - '**.py'
       - 'buildozer.spec'
       - 'assets/**'
+      - 'samples/**'
       - '.github/workflows/build-apk.yml'
 
 jobs:
@@ -123,6 +124,39 @@ jobs:
 
       - name: Show disk before build
         run: df -h /
+
+      # ---------------------------------------------------------------
+      # ⚠️ 固定 debug 签名，否则覆盖安装必然失败！
+      #
+      # GitHub 托管运行器是「用完即弃」的：每次构建 AGP 都会重新生成一份
+      # ~/.android/debug.keystore，于是每个 APK 的签名都不一样 —— 手机上
+      # 覆盖安装会报 INSTALL_FAILED_UPDATE_INCOMPATIBLE，只能先卸载
+      # （App 数据、导入的文档全丢）。
+      #
+      # 把这份 keystore 用固定 key 缓存起来：首次运行生成并保存，之后每次
+      # 都恢复同一份，签名就固定了，可以一直 `adb install -r` 平滑升级。
+      # ---------------------------------------------------------------
+      - name: Restore fixed debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: doclens-debug-keystore-v1
+
+      - name: Ensure debug keystore exists
+        run: |
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            echo "未命中缓存，生成固定 debug keystore"
+            keytool -genkeypair -v \
+              -keystore ~/.android/debug.keystore \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          else
+            echo "已恢复缓存的 debug keystore"
+          fi
+          keytool -list -keystore ~/.android/debug.keystore -storepass android | head -6
 
       - name: Build debug APK
         # buildozer 拒绝 root 运行；GH runner 默认就是非 root 用户，无需处理。
