@@ -10,7 +10,7 @@ source.include_exts = py,png,jpg,jpeg,kv,atlas,ttf,otf,md,txt,json
 source.include_patterns = assets/*,samples/*
 # 不打包源码整理工具 / 桌面测试 / 截图 / CI 配置
 # 注意：不要写 *.md —— samples/ 里的示例文档就是 .md，那是 App 要用到的。
-source.exclude_dirs = tools,shots,bin,.buildozer,__pycache__,.github,.git,.idea,.vscode
+source.exclude_dirs = tools,shots,shots2,bin,.buildozer,__pycache__,.github,.git,.idea,.vscode
 source.exclude_patterns = _smoke.py,*.pyc,*.out,*.bat,*.sh,README*,buildozer.spec
 
 version = 1.0.0
