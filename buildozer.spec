@@ -16,7 +16,10 @@ source.exclude_patterns = _smoke.py,*.pyc,*.out,*.bat,*.sh,README*,buildozer.spe
 version = 1.0.0
 
 # ── 依赖 ────────────────────────────────────────────────
-requirements = python3,kivy==2.3.1,pyjnius,android
+# ⚠️ Kivy 2.3.x 的 kivy/core/image/__init__.py 在模块加载时就 import filetype，
+# 而 p4a v2024.01.21 的 kivy recipe 没有把它带进来 → 缺了会直接
+# ModuleNotFoundError 闪退。必须显式加上。
+requirements = python3,kivy==2.3.1,pyjnius,android,filetype
 
 orientation = portrait
 fullscreen = 0

@@ -8,11 +8,18 @@
 import os
 import sys
 
-# 原生崩溃（SIGSEGV）Python 的 try/except 抓不到，但 faulthandler 会在
-# 收到信号的瞬间把「当时执行到哪一行 Python」打到 stderr（p4a 重定向到 logcat），
-# 帮我们定位是哪句 Python 触发了原生崩溃。必须尽早启用。
+# 原生崩溃（SIGSEGV）Python 的 try/except 抓不到，faulthandler 能在信号发生时
+# 把「当时执行到哪一行 Python」写进日志。⚠️ 坑：安卓上 p4a 会把 sys.stderr 换成
+# 一个不支持 fileno() 的伪文件，直接 faulthandler.enable()（默认写 stderr）会抛
+# io.UnsupportedOperation: fileno，在启动第一行就把 App 干崩——所以必须显式传一个
+# 真实文件，并用 try 兜底，绝不能让它影响启动。
 import faulthandler
-faulthandler.enable()
+try:
+    _FAULT_LOG = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "faulthandler.log"), "w")
+    faulthandler.enable(file=_FAULT_LOG)
+except Exception:
+    _FAULT_LOG = None
 
 # 让 core / screens 能被 import
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
