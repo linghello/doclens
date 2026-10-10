@@ -217,8 +217,7 @@ class DocLens(App):
     # ── 启动收尾 ────────────────────────────────────
     def _startup(self):
         try:
-            if platform not in ("android", "ios"):
-                self._load_desktop_samples()
+            self._load_bundled_samples()
             self.ui.library.refresh()
             self.ui.library.animate_in()
             Clock.schedule_once(lambda dt: self.core.maybe_first_hint(), 1.2)
@@ -236,21 +235,33 @@ class DocLens(App):
             except Exception:
                 pass
 
-    def _load_desktop_samples(self):
-        """桌面首次运行时塞两篇示例文档，方便直接看到效果。"""
+    def _load_bundled_samples(self):
+        """首次运行导入安装包内置的使用手册 / 示例文档。
+
+        以前只在桌面端做，安卓端装完打开就是一片空白 —— 用户连「怎么导入
+        文档、设置在哪」都不知道。现在两端都导入，并且只导入一次：
+        用户删掉之后不会再自动塞回来。
+        """
         store = self.core.store
-        if store.list_docs():
-            return
+        try:
+            if store.get("bundled_samples_loaded"):
+                return
+        except Exception:
+            pass
         samples = os.path.join(BASE, "samples")
-        if not os.path.isdir(samples):
-            return
-        for fn in sorted(os.listdir(samples)):
-            if os.path.splitext(fn)[1].lower() not in (".md", ".txt"):
-                continue
-            try:
-                store.import_path(os.path.join(samples, fn))
-            except Exception as exc:
-                Logger.warning("DocLens: 导入示例失败 %s: %s", fn, exc)
+        if os.path.isdir(samples):
+            for fn in sorted(os.listdir(samples)):
+                if os.path.splitext(fn)[1].lower() not in (".md", ".txt"):
+                    continue
+                try:
+                    store.import_path(os.path.join(samples, fn))
+                except Exception as exc:
+                    Logger.warning("DocLens: 导入内置示例失败 %s: %s", fn, exc)
+        try:
+            store.set("bundled_samples_loaded", True)
+            store.flush()
+        except Exception:
+            pass
 
     # ── 输入事件 ────────────────────────────────────
     def _on_key(self, _win, key, *_a):
